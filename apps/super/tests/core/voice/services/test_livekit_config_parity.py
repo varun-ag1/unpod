@@ -9,82 +9,88 @@ are also available in LiveKit services for seamless migration.
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
-# Mock pipecat and livekit dependencies before any imports
-pipecat_mock = MagicMock()
-sys.modules["pipecat"] = pipecat_mock
-sys.modules["pipecat.transports"] = MagicMock()
-sys.modules["pipecat.transports.livekit"] = MagicMock()
-sys.modules["pipecat.transports.livekit.transport"] = MagicMock()
-sys.modules["pipecat.audio.vad.silero"] = MagicMock()
-sys.modules["pipecat.audio.vad.vad_analyzer"] = MagicMock()
-sys.modules["pipecat.audio"] = MagicMock()
-sys.modules["pipecat.audio.vad"] = MagicMock()
-sys.modules["pipecat.services"] = MagicMock()
-sys.modules["pipecat.services.openai"] = MagicMock()
-sys.modules["pipecat.services.deepgram"] = MagicMock()
-sys.modules["pipecat.services.cartesia"] = MagicMock()
-sys.modules["pipecat.services.elevenlabs"] = MagicMock()
-sys.modules["pipecat.services.playht"] = MagicMock()
-sys.modules["pipecat.services.google"] = MagicMock()
-sys.modules["pipecat.services.lmnt"] = MagicMock()
-sys.modules["pipecat.services.azure"] = MagicMock()
-sys.modules["pipecat.services.anthropic"] = MagicMock()
-sys.modules["pipecat.services.xtts"] = MagicMock()
-sys.modules["pipecat.processors"] = MagicMock()
-sys.modules["pipecat.processors.aggregators.llm_response"] = MagicMock()
-sys.modules["pipecat.processors.aggregators"] = MagicMock()
-sys.modules["pipecat.processors.filters"] = MagicMock()
-sys.modules["pipecat.frames"] = MagicMock()
-sys.modules["pipecat.frames.frames"] = MagicMock()
-sys.modules["pipecat.pipeline"] = MagicMock()
-sys.modules["pipecat.pipeline.pipeline"] = MagicMock()
-sys.modules["pipecat.pipeline.task"] = MagicMock()
-sys.modules["pipecat.pipeline.runner"] = MagicMock()
-sys.modules["pipecat.clocks"] = MagicMock()
-sys.modules["pipecat.clocks.system_clock"] = MagicMock()
-sys.modules["pipecat.sync"] = MagicMock()
-sys.modules["pipecat.sync.base_notifier"] = MagicMock()
-sys.modules["pipecat.sync.event_notifier"] = MagicMock()
-sys.modules["pipecat.transcriptions"] = MagicMock()
-sys.modules["pipecat.transcriptions.language"] = MagicMock()
-sys.modules["bson"] = MagicMock()
-sys.modules["bson.objectid"] = MagicMock()
-
-# Mock livekit plugins before importing
-mock_livekit = MagicMock()
-mock_livekit_agents = MagicMock()
-mock_livekit_rtc = MagicMock()
-
-sys.modules["livekit"] = mock_livekit
-sys.modules["livekit.agents"] = mock_livekit_agents
-sys.modules["livekit.agents.llm"] = MagicMock()
-sys.modules["livekit.agents.pipeline"] = MagicMock()
-sys.modules["livekit.agents.voice_assistant"] = MagicMock()
-sys.modules["livekit.agents.voice"] = MagicMock()
-sys.modules["livekit.agents.multimodal"] = MagicMock()
-sys.modules["livekit.agents.tokenize"] = MagicMock()
-sys.modules["livekit.agents.stt"] = MagicMock()
-sys.modules["livekit.agents.tts"] = MagicMock()
-sys.modules["livekit.plugins"] = MagicMock()
-sys.modules["livekit.plugins.openai"] = MagicMock()
-sys.modules["livekit.plugins.deepgram"] = MagicMock()
-sys.modules["livekit.plugins.cartesia"] = MagicMock()
-sys.modules["livekit.plugins.silero"] = MagicMock()
-sys.modules["livekit.plugins.turn_detector"] = MagicMock()
-sys.modules["livekit.plugins.anthropic"] = MagicMock()
-sys.modules["livekit.plugins.google"] = MagicMock()
-sys.modules["livekit.plugins.groq"] = MagicMock()
-sys.modules["livekit.plugins.aws"] = MagicMock()
-sys.modules["livekit.plugins.playai"] = MagicMock()
-sys.modules["livekit.plugins.elevenlabs"] = MagicMock()
-sys.modules["livekit.plugins.eleven_labs"] = MagicMock()
-sys.modules["livekit.plugins.sarvam"] = MagicMock()
-sys.modules["livekit.plugins.lmnt"] = MagicMock()
-sys.modules["livekit.plugins.xai"] = MagicMock()
-sys.modules["livekit.rtc"] = mock_livekit_rtc
-sys.modules["livekit.rtc._proto"] = MagicMock()
-
 import pytest
+
+MOCKED_DEPENDENCY_MODULES = (
+    "pipecat",
+    "pipecat.transports",
+    "pipecat.transports.livekit",
+    "pipecat.transports.livekit.transport",
+    "pipecat.audio",
+    "pipecat.audio.vad",
+    "pipecat.audio.vad.silero",
+    "pipecat.audio.vad.vad_analyzer",
+    "pipecat.services",
+    "pipecat.services.openai",
+    "pipecat.services.deepgram",
+    "pipecat.services.cartesia",
+    "pipecat.services.elevenlabs",
+    "pipecat.services.playht",
+    "pipecat.services.google",
+    "pipecat.services.lmnt",
+    "pipecat.services.azure",
+    "pipecat.services.anthropic",
+    "pipecat.services.xtts",
+    "pipecat.processors",
+    "pipecat.processors.aggregators.llm_response",
+    "pipecat.processors.aggregators",
+    "pipecat.processors.filters",
+    "pipecat.frames",
+    "pipecat.frames.frames",
+    "pipecat.pipeline",
+    "pipecat.pipeline.pipeline",
+    "pipecat.pipeline.task",
+    "pipecat.pipeline.runner",
+    "pipecat.clocks",
+    "pipecat.clocks.system_clock",
+    "pipecat.sync",
+    "pipecat.sync.base_notifier",
+    "pipecat.sync.event_notifier",
+    "pipecat.transcriptions",
+    "pipecat.transcriptions.language",
+    "bson",
+    "bson.objectid",
+    "livekit",
+    "livekit.agents",
+    "livekit.agents.llm",
+    "livekit.agents.pipeline",
+    "livekit.agents.voice_assistant",
+    "livekit.agents.voice",
+    "livekit.agents.multimodal",
+    "livekit.agents.tokenize",
+    "livekit.agents.stt",
+    "livekit.agents.tts",
+    "livekit.plugins",
+    "livekit.plugins.openai",
+    "livekit.plugins.deepgram",
+    "livekit.plugins.cartesia",
+    "livekit.plugins.silero",
+    "livekit.plugins.turn_detector",
+    "livekit.plugins.anthropic",
+    "livekit.plugins.google",
+    "livekit.plugins.groq",
+    "livekit.plugins.aws",
+    "livekit.plugins.playai",
+    "livekit.plugins.elevenlabs",
+    "livekit.plugins.eleven_labs",
+    "livekit.plugins.sarvam",
+    "livekit.plugins.lmnt",
+    "livekit.plugins.xai",
+    "livekit.rtc",
+    "livekit.rtc._proto",
+)
+
+
+@pytest.fixture(autouse=True)
+def _mock_runtime_dependencies(monkeypatch):
+    # Keep dependency mocking test-scoped so imports do not leak into other test packages.
+    for module_name in MOCKED_DEPENDENCY_MODULES:
+        monkeypatch.setitem(sys.modules, module_name, MagicMock())
+
+    # Import this module fresh under mocked dependencies for each test.
+    sys.modules.pop("super.core.voice.services.livekit_services", None)
+    yield
+    sys.modules.pop("super.core.voice.services.livekit_services", None)
 
 
 class TestLiveKitConfigParity:

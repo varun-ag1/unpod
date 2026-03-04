@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 SOURCE_PATH = Path("super/core/voice/livekit/lite_handler.py")
+SHARED_MIXIN_PATH = Path("super/core/voice/shared_mixin.py")
 
 
 def _class_methods():
@@ -11,6 +12,20 @@ def _class_methods():
         node
         for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "LiveKitLiteHandler"
+    )
+    methods = {}
+    for node in class_node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            methods[node.name] = node
+    return methods
+
+
+def _shared_mixin_methods():
+    module = ast.parse(SHARED_MIXIN_PATH.read_text(encoding="utf-8"))
+    class_node = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "SharedVoiceMixin"
     )
     methods = {}
     for node in class_node.body:
@@ -56,7 +71,20 @@ def test_end_call_uses_runtime_cleanup_helper() -> None:
 
 
 def test_runtime_cleanup_helper_exists_and_targets_background_tasks() -> None:
-    methods = _class_methods()
+    class_module = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"))
+    class_node = next(
+        node
+        for node in class_module.body
+        if isinstance(node, ast.ClassDef) and node.name == "LiveKitLiteHandler"
+    )
+    base_names = {
+        base.id
+        for base in class_node.bases
+        if isinstance(base, ast.Name)
+    }
+    assert "SharedVoiceMixin" in base_names
+
+    methods = _shared_mixin_methods()
     assert "_cleanup_runtime_resources" in methods
     cleanup = methods["_cleanup_runtime_resources"]
 
@@ -66,8 +94,6 @@ def test_runtime_cleanup_helper_exists_and_targets_background_tasks() -> None:
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self"
     }
     assert "_kb_warmup_task" in referenced_attrs
-    assert "_participant_stt_tasks" in referenced_attrs
-    assert "_participant_stt_streams" in referenced_attrs
 
     called_self_methods = {
         node.func.attr
@@ -78,4 +104,4 @@ def test_runtime_cleanup_helper_exists_and_targets_background_tasks() -> None:
         and node.func.value.id == "self"
     }
     assert "_stop_idle_monitor" in called_self_methods
-    assert "_stop_background_audio" in called_self_methods
+    assert "_handler_specific_cleanup" in called_self_methods

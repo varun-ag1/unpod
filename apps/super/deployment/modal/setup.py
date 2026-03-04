@@ -94,27 +94,47 @@ def _read_env_file(path: str) -> dict[str, str]:
                 continue
             if "=" in line:
                 key, _, value = line.partition("=")
-                # Strip quotes from values
-                val = value.strip().strip('"').strip("'")
+                value = value.strip()
+                # Extract quoted value (ignore trailing comments)
+                if value.startswith('"'):
+                    end = value.find('"', 1)
+                    val = value[1:end] if end > 0 else value.strip('"')
+                elif value.startswith("'"):
+                    end = value.find("'", 1)
+                    val = value[1:end] if end > 0 else value.strip("'")
+                else:
+                    # Unquoted: strip inline comment (space + #)
+                    if " #" in value:
+                        value = value[: value.index(" #")]
+                    val = value.strip()
                 env[key.strip()] = val
     return env
+
+
+def _find_env_file(directory: str) -> tuple[str, str]:
+    """Find the best .env file in a directory.
+
+    Checks .env first, then .env.bkp as fallback.
+    Returns (path, label) tuple.
+    """
+    for name in (".env", ".env.bkp"):
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            return path, name
+    return os.path.join(directory, ".env"), ".env"
 
 
 def _prompt_secrets() -> dict[str, str]:
     """Upload all env vars from .env files to Modal secrets."""
     # Read both .env files (super_services/.env overrides root .env)
-    root_env = _read_env_file(os.path.join(PROJECT_ROOT, ".env"))
-    svc_env = _read_env_file(
-        os.path.join(PROJECT_ROOT, "super_services", ".env")
+    root_path, root_label = _find_env_file(PROJECT_ROOT)
+    svc_path, svc_label = _find_env_file(
+        os.path.join(PROJECT_ROOT, "super_services")
     )
+    root_env = _read_env_file(root_path)
+    svc_env = _read_env_file(svc_path)
     # Merge: super_services values take priority
     secrets = {**root_env, **svc_env}
-
-    # Strip inline comments from values (e.g. "value  #comment")
-    for key in list(secrets):
-        val = secrets[key]
-        if "  #" in val:
-            secrets[key] = val.split("  #")[0].strip()
 
     # Remove empty values and placeholder values
     secrets = {
@@ -123,8 +143,8 @@ def _prompt_secrets() -> dict[str, str]:
     }
 
     print(f"\n  Collected {len(secrets)} env vars from:")
-    print(f"    - .env ({len(root_env)} vars)")
-    print(f"    - super_services/.env ({len(svc_env)} vars)")
+    print(f"    - {root_label} ({len(root_env)} vars)")
+    print(f"    - super_services/{svc_label} ({len(svc_env)} vars)")
 
     # Check for missing required secrets
     missing = [v for v in _REQUIRED_SECRETS if v not in secrets]
@@ -234,26 +254,173 @@ def step_secrets() -> dict[str, str]:
     return secrets
 
 
-def step_review() -> bool:
-    """Step 3: Review config before deploying."""
-    print("\n[Step 3/4] Review Configuration")
+# Default deployment options (match modal_app.py defaults)
+_DEPLOY_DEFAULTS: dict[str, str] = {
+    "MODAL_REGION": "ap-south",
+    "MODAL_IMAGE": "debian_slim",
+    "MODAL_PYTHON_VERSION": "3.12",
+    "MODAL_COMPUTE": "cpu",
+    "MODAL_GPU": "",
+    "MODAL_CPU": "4",
+    "MODAL_MEMORY_GB": "8",
+    "MODAL_MIN_CONTAINERS": "1",
+    "MODAL_MAX_CONTAINERS": "10",
+    "MODAL_SCALEDOWN": "300",
+    "MODAL_TIMEOUT": "3600",
+    "MODAL_PROXY_NAME": "voice-executor-proxy",
+    "MODAL_ENV": "main",
+}
+
+_REGION_OPTIONS = [
+    "us", "eu", "ap", "ap-south", "ap-southeast",
+    "uk", "ca", "me", "sa", "af", "mx",
+]
+
+_IMAGE_OPTIONS = ["debian_slim", "ubuntu_22.04", "micromamba"]
+
+_GPU_OPTIONS = [
+    "T4", "L4", "A10G", "L40S", "A100", "A100:80GB", "H100", "Any",
+]
+
+
+def _prompt_with_default(prompt: str, default: str) -> str:
+    """Prompt user with a default value."""
+    value = input(f"  {prompt} [{default}]: ").strip()
+    return value if value else default
+
+
+def step_config() -> dict[str, str]:
+    """Step 3: Configure deployment options interactively."""
+    print("\n[Step 3/5] Deployment Configuration")
+    print("=" * 40)
+    print("  Configure compute, region, and scaling.")
+    print("  Press Enter to keep defaults.\n")
+
+    config: dict[str, str] = {}
+
+    # --- Container Image ---
+    print("  Container Image")
+    print(f"  Available: {', '.join(_IMAGE_OPTIONS)}")
+    config["MODAL_IMAGE"] = _prompt_with_default(
+        "Base image", _DEPLOY_DEFAULTS["MODAL_IMAGE"]
+    )
+    config["MODAL_PYTHON_VERSION"] = _prompt_with_default(
+        "Python version", _DEPLOY_DEFAULTS["MODAL_PYTHON_VERSION"]
+    )
+
+    # --- Compute ---
+    print("\n  Compute")
+    compute = _prompt_with_default(
+        "Compute type (cpu/gpu)", _DEPLOY_DEFAULTS["MODAL_COMPUTE"]
+    )
+    config["MODAL_COMPUTE"] = compute
+
+    if compute == "gpu":
+        print(f"  Available GPUs: {', '.join(_GPU_OPTIONS)}")
+        print("  Use 'T4:2' for multi-GPU (e.g. 2x T4)")
+        config["MODAL_GPU"] = _prompt_with_default(
+            "GPU type", "T4"
+        )
+        config["MODAL_CPU"] = _prompt_with_default(
+            "CPU cores", "2"
+        )
+    else:
+        config["MODAL_GPU"] = ""
+        config["MODAL_CPU"] = _prompt_with_default(
+            "CPU cores", _DEPLOY_DEFAULTS["MODAL_CPU"]
+        )
+
+    config["MODAL_MEMORY_GB"] = _prompt_with_default(
+        "Memory (GB)", _DEPLOY_DEFAULTS["MODAL_MEMORY_GB"]
+    )
+
+    # --- Region ---
+    print("\n  Region")
+    print(f"  Available: {', '.join(_REGION_OPTIONS)}")
+    config["MODAL_REGION"] = _prompt_with_default(
+        "Region", _DEPLOY_DEFAULTS["MODAL_REGION"]
+    )
+
+    # --- Scaling ---
+    print("\n  Scaling")
+    config["MODAL_MIN_CONTAINERS"] = _prompt_with_default(
+        "Min containers (always running)",
+        _DEPLOY_DEFAULTS["MODAL_MIN_CONTAINERS"],
+    )
+    config["MODAL_MAX_CONTAINERS"] = _prompt_with_default(
+        "Max containers (scale limit)",
+        _DEPLOY_DEFAULTS["MODAL_MAX_CONTAINERS"],
+    )
+    config["MODAL_SCALEDOWN"] = _prompt_with_default(
+        "Scaledown window (seconds)",
+        _DEPLOY_DEFAULTS["MODAL_SCALEDOWN"],
+    )
+    config["MODAL_TIMEOUT"] = _prompt_with_default(
+        "Container timeout (seconds)",
+        _DEPLOY_DEFAULTS["MODAL_TIMEOUT"],
+    )
+
+    # --- Network ---
+    print("\n  Network")
+    config["MODAL_PROXY_NAME"] = _prompt_with_default(
+        "Proxy name (empty to disable)",
+        _DEPLOY_DEFAULTS["MODAL_PROXY_NAME"],
+    )
+
+    # --- Environment ---
+    print("\n  Environment")
+    config["MODAL_ENV"] = _prompt_with_default(
+        "Modal environment",
+        _DEPLOY_DEFAULTS["MODAL_ENV"],
+    )
+
+    return config
+
+
+def step_review(config: dict[str, str]) -> bool:
+    """Step 4: Review config before deploying."""
+    print("\n[Step 4/5] Review Configuration")
     print("=" * 40)
 
-    print("\n  Modal App: unpod-voice-agent")
-    print("  Resources: 4 CPU, 8 GB RAM")
-    print("  Min containers: 1")
-    print("  Scaledown: 5 minutes")
-    print("  Graceful shutdown: 600s")
-    print(f"  App file: {MODAL_APP}")
+    mem_gb = config.get("MODAL_MEMORY_GB", "8")
+    gpu = config.get("MODAL_GPU", "")
+    proxy = config.get("MODAL_PROXY_NAME", "")
+    compute = "GPU" if gpu else "CPU"
+
+    print(f"\n  App:            unpod-voice-agent")
+    print(f"  Environment:    {config.get('MODAL_ENV', 'main')}")
+    print()
+    print(f"  Image:          {config.get('MODAL_IMAGE', 'debian_slim')}")
+    print(f"  Python:         {config.get('MODAL_PYTHON_VERSION', '3.12')}")
+    print()
+    print(f"  Compute:        {compute}")
+    if gpu:
+        print(f"  GPU:            {gpu}")
+    print(f"  CPU:            {config.get('MODAL_CPU', '4')} cores")
+    print(f"  Memory:         {mem_gb} GB")
+    print()
+    print(f"  Region:         {config.get('MODAL_REGION', 'ap-south')}")
+    print(f"  Proxy:          {proxy if proxy else '(disabled)'}")
+    print()
+    print(f"  Min containers: {config.get('MODAL_MIN_CONTAINERS', '1')}")
+    print(f"  Max containers: {config.get('MODAL_MAX_CONTAINERS', '10')}")
+    print(f"  Scaledown:      {config.get('MODAL_SCALEDOWN', '300')}s")
+    print(f"  Timeout:        {config.get('MODAL_TIMEOUT', '3600')}s")
+    print()
+    print(f"  App file:       {MODAL_APP}")
 
     print()
     proceed = input("  Deploy with this configuration? [Y/n]: ").strip().lower()
     return proceed != "n"
 
 
-def step_deploy() -> bool:
-    """Step 4: Deploy to Modal."""
-    print("\n[Step 4/4] Deploying to Modal")
+def step_deploy(config: dict[str, str] | None = None) -> bool:
+    """Step 5: Deploy to Modal."""
+    if config is None:
+        config = dict(_DEPLOY_DEFAULTS)
+
+    step_num = "5/5" if config else "4/4"
+    print(f"\n[Step {step_num}] Deploying to Modal")
     print("=" * 40)
 
     if not _ensure_cli_installed():
@@ -264,11 +431,18 @@ def step_deploy() -> bool:
     if not _generate_requirements():
         return False
 
+    # Pass config as environment variables to modal_app.py
+    deploy_env = os.environ.copy()
+    deploy_env.update(config)
+
+    modal_env = config.get("MODAL_ENV", "main")
+
     print("  Running modal deploy...")
     result = subprocess.run(
-        ["modal", "deploy", "--env", "main", MODAL_APP],
+        ["modal", "deploy", "--env", modal_env, MODAL_APP],
         text=True,
         capture_output=False,
+        env=deploy_env,
     )
 
     if result.returncode != 0:
@@ -289,8 +463,9 @@ def cmd_full_setup() -> int:
     print("This will walk you through:")
     print("  1. Authenticate with Modal")
     print("  2. Upload secrets (API keys)")
-    print("  3. Review deployment config")
-    print("  4. Deploy the voice executor")
+    print("  3. Configure deployment options")
+    print("  4. Review configuration")
+    print("  5. Deploy the voice executor")
     print()
 
     proceed = input("Ready to start? [Y/n]: ").strip().lower()
@@ -302,14 +477,26 @@ def cmd_full_setup() -> int:
 
     step_secrets()
 
-    if not step_review():
+    config = step_config()
+
+    if not step_review(config):
         print("Cancelled.")
         return 0
 
-    if not step_deploy():
+    if not step_deploy(config):
         return 1
 
     return 0
+
+
+def cmd_deploy_only() -> int:
+    """Deploy with defaults or env var overrides."""
+    # Use env vars if set, otherwise defaults
+    config = {
+        k: os.environ.get(k, v)
+        for k, v in _DEPLOY_DEFAULTS.items()
+    }
+    return 0 if step_deploy(config) else 1
 
 
 def main() -> int:
@@ -319,7 +506,7 @@ def main() -> int:
         "setup": cmd_full_setup,
         "login": lambda: 0 if step_login() else 1,
         "secrets": lambda: 0 if step_secrets() else 1,
-        "deploy": lambda: 0 if step_deploy() else 1,
+        "deploy": cmd_deploy_only,
     }
 
     if subcmd in commands:

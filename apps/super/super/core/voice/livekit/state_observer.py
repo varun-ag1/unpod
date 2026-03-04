@@ -11,8 +11,11 @@ The observer monitors Pipecat frames and updates LiveKit participant attributes:
 """
 
 import logging
+import os
 from collections import deque
 from typing import Any, Deque, Optional, Set
+
+_ATTRIBUTES_DISABLED = os.environ.get("LIVEKIT_DISABLE_ATTRIBUTES", "").strip() == "1"
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -401,6 +404,10 @@ class LiveKitStateObserver(BaseObserver):
             )
             return
 
+        if _ATTRIBUTES_DISABLED:
+            self._logger.debug(f"[StateObserver] set_attributes disabled, skipping: {state}")
+            return
+
         try:
             await participant.set_attributes({"lk.agent.state": state})
             self._logger.info(
@@ -449,15 +456,23 @@ class LiveKitStateObserver(BaseObserver):
                 final=is_final,
             )
 
-            # Create transcription with participant identity
-            # track_sid is empty string when not associated with a specific track
+            # Get audio track SID - required by Rust SDK (empty string causes panic)
+            track_sid = ""
+            for pub in participant.track_publications.values():
+                if pub.source == rtc.TrackSource.SOURCE_MICROPHONE and pub.sid:
+                    track_sid = pub.sid
+                    break
+
+            if not track_sid:
+                self._logger.debug("[StateObserver] No audio track SID, skipping transcript publish")
+                return
+
             transcription = rtc.Transcription(
                 participant_identity=participant.identity,
-                track_sid="",  # Empty when not from a specific audio track
+                track_sid=track_sid,
                 segments=[segment],
             )
 
-            # Publish transcription via native LiveKit API
             await participant.publish_transcription(transcription)
 
             text_preview = content[:50] if len(content) > 50 else content

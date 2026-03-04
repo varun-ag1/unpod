@@ -32,6 +32,8 @@ exclude = [
 cpu = 4
 memory = 8.0
 compute = "CPU"
+provider = "aws"
+region = "us-east-1"
 
 [cerebrium.scaling]
 min_replicas = 1
@@ -39,9 +41,32 @@ max_replicas = 5
 cooldown = 30
 replica_concurrency = 1
 
+[cerebrium.dependencies.apt]
+gcc = "latest"
+"g++" = "latest"
+python3-dev = "latest"
+libpq-dev = "latest"
+git = "latest"
+curl = "latest"
+portaudio19-dev = "latest"
+ffmpeg = "latest"
+libsndfile1 = "latest"
+
 [cerebrium.dependencies.paths]
 pip = "requirements.txt"
 
+[cerebrium.environment]
+PYTHONPATH = "/cortex"
+PYTHONUNBUFFERED = "1"
+SETTINGS_FILE = "super_services.settings.prod"
+HF_HOME = "/cortex/.hf_cache"
+
+[cerebrium.build]
+shell_commands = [
+    "SKIP_DB_CHECK=1 python /cortex/super_services/orchestration/executors/voice_executor_v3.py download-files",
+]
+
 [cerebrium.runtime.custom]
+entrypoint = ["python", "-u", "/cortex/super_services/orchestration/executors/voice_executor_v3.py", "start"]
 port = 8600
-dockerfile_path = "./deployment/cerebrium/Dockerfile"
+healthcheck_endpoint = "/"

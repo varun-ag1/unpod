@@ -1,3 +1,4 @@
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
@@ -7,7 +8,7 @@ from dataclasses import dataclass, field
 class CallResult:
     """Standard call result structure across all providers"""
 
-    status: str 
+    status: str
     call_id: Optional[str] = None
     customer: Optional[str] = None
     contact_number: Optional[str] = None
@@ -24,6 +25,30 @@ class CallResult:
     call_end: str = None
     assistant_number: str = None
     duration: Optional[int] = 0
+
+
+class CallProviderBase:
+    """Common base for CallProviderFactory and CallDispatcher.
+
+    Holds shared static methods so the provider-type logic lives in one place.
+    """
+
+    @staticmethod
+    def get_provider_type(data: Dict[str, Any]) -> str:
+        """Determine provider from data.
+
+        - quality == "high" → vapi
+        - Otherwise         → AGENT_PROVIDER env var (default: pipecat)
+        """
+        quality = data.get("quality", "good")
+        if quality == "high":
+            return "vapi"
+        return os.environ.get("AGENT_PROVIDER", "pipecat")
+
+    @staticmethod
+    def validate_data(data: Dict[str, Any]) -> bool:
+        """Validate if the data has required fields for dispatch."""
+        return "contact_number" in data or "room" in data
 
 
 class CallProvider(ABC):

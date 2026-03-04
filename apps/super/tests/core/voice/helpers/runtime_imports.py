@@ -48,8 +48,15 @@ def ensure_real_livekit() -> None:
 
 def ensure_lightweight_prompt_manager() -> None:
     """Stub PromptManager imports to avoid heavy manager side effects in tests."""
-    managers_pkg = types.ModuleType("super.core.voice.managers")
-    managers_pkg.__path__ = []
+    # Keep the real managers package importable so other modules
+    # (e.g. knowledge_base) remain discoverable in full-suite runs.
+    if "super.core.voice.managers" not in sys.modules:
+        try:
+            importlib.import_module("super.core.voice.managers")
+        except Exception:
+            managers_pkg = types.ModuleType("super.core.voice.managers")
+            managers_pkg.__path__ = []
+            sys.modules["super.core.voice.managers"] = managers_pkg
 
     prompt_module = types.ModuleType("super.core.voice.managers.prompt_manager")
 
@@ -68,7 +75,6 @@ def ensure_lightweight_prompt_manager() -> None:
 
     prompt_module.PromptManager = PromptManager
 
-    sys.modules["super.core.voice.managers"] = managers_pkg
     sys.modules["super.core.voice.managers.prompt_manager"] = prompt_module
 
 

@@ -64,6 +64,7 @@ COPY --from=builder /app /app
 ENV SETTINGS_FILE="super_services.settings.qa"
 ENV PATH="/app/.venv/bin:$PATH"
 RUN SKIP_DB_CHECK=1 python super_services/orchestration/executors/voice_executor_v3.py download-files
+RUN python -c "from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2; ONNXMiniLM_L6_V2()"
 
 # Switch to non-privileged user
 RUN chown -R appuser:appuser /app

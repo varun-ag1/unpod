@@ -5,7 +5,6 @@ from typing import Dict, Any, List
 
 from prefect import task, flow
 
-from super.core.voice.eval_agent.eval_test_agent import EvalTestAgent, EvalResults
 from super_services.voice.models.config import ModelConfig
 from super_services.db.services.schemas.task import TaskStatusEnum
 
@@ -13,7 +12,9 @@ from super_services.db.services.schemas.task import TaskStatusEnum
 @task(
     name="eval_test",
 )
-async def eval_test(config: Dict[str, Any], test_cases: List[Dict]) -> EvalResults:
+async def eval_test(config: Dict[str, Any], test_cases: List[Dict]):
+    from super.core.voice.eval_agent.eval_test_agent import EvalTestAgent
+
     agent = EvalTestAgent(config)
     results = await agent.test_llm_agent(test_cases)
     return results

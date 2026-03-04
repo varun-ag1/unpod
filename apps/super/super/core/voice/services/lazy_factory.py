@@ -10,7 +10,10 @@ import logging
 from typing import Any, Callable, Optional
 
 from pipecat.services.llm_service import LLMService
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+)
 
 from super.core.voice.pipecat.services import ServiceFactory
 
@@ -78,6 +81,7 @@ class LazyServiceFactory:
                 config=self._config,
                 logger=self._logger,
                 tool_calling=self._config.get("tool_calling", True),
+                use_realtime=self._use_realtime,
                 get_docs_callback=self._get_docs_callback,
             )
         return self._service_factory
@@ -156,33 +160,22 @@ class LazyServiceFactory:
             self._tts_ready.set()
             return self._tts
 
-    async def get_context_aggregator(
+    def get_context_aggregator(
         self,
-        context: OpenAILLMContext,
-        aggregation_timeout: float = 0.05,
-    ) -> Any:
-        """
-        Get or create context aggregator.
+        context: LLMContext,
+    ) -> LLMContextAggregatorPair:
+        """Get or create context aggregator using universal API.
 
         Args:
             context: LLM context to aggregate
-            aggregation_timeout: Timeout for aggregation
 
         Returns:
-            Context aggregator instance
+            LLMContextAggregatorPair instance
         """
         if self._context_aggregator is not None:
             return self._context_aggregator
 
-        llm = await self.get_llm()
-        from pipecat.processors.aggregators.llm_response import LLMUserAggregatorParams
-
-        self._context_aggregator = llm.create_context_aggregator(
-            context,
-            user_params=LLMUserAggregatorParams(
-                aggregation_timeout=aggregation_timeout
-            ),
-        )
+        self._context_aggregator = LLMContextAggregatorPair(context)
         return self._context_aggregator
 
     async def _create_stt(self) -> Any:

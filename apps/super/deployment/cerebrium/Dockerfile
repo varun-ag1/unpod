@@ -21,6 +21,8 @@ COPY __init__.py .
 ENV PYTHONPATH="/app"
 ENV PYTHONUNBUFFERED=1
 ENV SETTINGS_FILE="super_services.settings.prod"
+# Pin HuggingFace cache inside /app so models survive build→runtime
+ENV HF_HOME="/app/.hf_cache"
 
 # Pre-download ML models at build time (SKIP_DB_CHECK: no DB during build)
 RUN SKIP_DB_CHECK=1 python super_services/orchestration/executors/voice_executor_v3.py download-files

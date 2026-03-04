@@ -49,12 +49,16 @@ Usage:
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, TypedDict, Union
 
 from super.core.logging import logging as app_logging
+
+# Set LIVEKIT_DISABLE_ATTRIBUTES=1 to skip all set_attributes calls (debugging)
+_ATTRIBUTES_DISABLED = os.environ.get("LIVEKIT_DISABLE_ATTRIBUTES", "").strip() == "1"
 
 
 class DataReceivedEvent(TypedDict, total=False):
@@ -580,7 +584,7 @@ class LiveKitEventBridge:
 
     async def _emit_state_attribute(self, state: str):
         """Emit agent state via participant attributes."""
-        if not self.local_participant:
+        if not self.local_participant or _ATTRIBUTES_DISABLED:
             return
 
         try:
@@ -724,7 +728,7 @@ class LiveKitEventBridge:
 
     async def _emit_transcript_attribute(self, data: dict):
         """Emit transcript via participant attributes."""
-        if not self.local_participant:
+        if not self.local_participant or _ATTRIBUTES_DISABLED:
             return
 
         try:
@@ -757,7 +761,7 @@ class LiveKitEventBridge:
 
     async def _emit_custom_attribute(self, name: str, data: Any):
         """Emit custom event via participant attributes."""
-        if not self.local_participant:
+        if not self.local_participant or _ATTRIBUTES_DISABLED:
             return
 
         try:
@@ -1186,7 +1190,7 @@ class LiveKitEventBridge:
         """
         await self._ensure_initialized()
 
-        if self.local_participant:
+        if self.local_participant and not _ATTRIBUTES_DISABLED:
             try:
                 await self.local_participant.set_attributes(attributes)
             except Exception as e:

@@ -9,10 +9,8 @@ import uuid
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
-
 import openai
 import requests
-
 from super_services.voice.models.config import ModelConfig
 from super_services.db.services.models.agent_eval import (
     AgentQAPairModel,
@@ -64,7 +62,9 @@ class EvalGenerator:
 
     # OpenAI model to use for QA generation
     OPENAI_MODEL = "gpt-4o"
-
+    # gpt-4o pricing USD per 1M tokens (source: platform.openai.com/docs/models/gpt-4o)
+    _INPUT_PRICE_PER_1M: float = 2.50
+    _OUTPUT_PRICE_PER_1M: float = 10.00
     # Agent evaluation types — 7 types × 5 pairs = 35 total
     AGENT_EVAL_TYPES = [
         "system_prompt_eval",
@@ -75,17 +75,15 @@ class EvalGenerator:
         "prompt_generation",
         "analytics_fields",
     ]
-
     # KB document evaluation types — 3 types × 3 pairs × num_pages
     KB_EVAL_TYPES = [
         "Introduction",
         "Q&A",
         "ObjectionHandling",
     ]
-
-    AGENT_PAIRS_PER_TYPE = 5        # 7 × 5 = 35 agent pairs total
+    AGENT_PAIRS_PER_TYPE = 5  # 7 × 5 = 35 agent pairs total
     KB_PAIRS_PER_TYPE_PER_PAGE = 3  # 3 × 3 × pages KB pairs per token
-    KB_DEFAULT_PAIRS_TOTAL = 65     # fallback when KB has no documents
+    KB_DEFAULT_PAIRS_TOTAL = 65  # fallback when KB has no documents
 
     def __init__(
         self,
@@ -105,6 +103,16 @@ class EvalGenerator:
         self.language = self.languages[0]
         self.language_count = len(self.languages)
         self.formality = "formal"
+        self._token_usage: Dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        self._cost_usd: Dict[str, float] = {
+            "input_cost": 0.0,
+            "output_cost": 0.0,
+            "total_cost": 0.0,
+        }
 
     def _normalize_languages(self, language: Optional[str]) -> List[str]:
         normalized = (language or "").strip().lower()
@@ -189,15 +197,12 @@ class EvalGenerator:
         """
         Generate all QA pairs for the agent (from config + knowledge base).
         Skips per eval_type if already generated (unless force_regenerate=True).
-
         Agent evals: 7 types × 5 pairs = 35 total
         KB evals: 3 types × 3 pairs × num_pages (or 65 default if no pages)
-
         Returns:
             Dict with generation statistics and per-type status
         """
         self.logger.info(f"Starting eval generation for agent: {self.agent_id}")
-
         results: Dict[str, Any] = {
             "batch_id": self.batch_id,
             "agent_qa_count": 0,
@@ -210,7 +215,6 @@ class EvalGenerator:
                 "kb": {},
             },
         }
-
         gen_eval_kb = False
         if self.gen_type == "knowledgebase":
             gen_eval_kb = True
@@ -219,26 +223,25 @@ class EvalGenerator:
             agent_config = self._get_agent_config()
             if not agent_config:
                 raise ValueError(f"Agent config not found for: {self.agent_id}")
-
             eval_config = _fetch_eval_info("pilot", self.agent_id)
             if not eval_config:
                 raise ValueError(f"Eval config not found for: {self.agent_id}")
-
             eval_token = eval_config.get("eval_data", {}).get("space_token")
             eval_id = eval_config.get("id")
             if not eval_token:
                 raise ValueError(f"Eval token not found for: {self.agent_id}")
-
-            existing_type_counts = self._get_existing_type_counts(eval_token, AgentQAPairModel)
+            existing_type_counts = self._get_existing_type_counts(
+                eval_token, AgentQAPairModel
+            )
             total_existing = sum(existing_type_counts.values())
-
             all_types_complete = all(
                 existing_type_counts.get(t, 0) >= self.AGENT_PAIRS_PER_TYPE
                 for t in self.AGENT_EVAL_TYPES
             )
-
             if all_types_complete and not force_regenerate:
-                skip_msg = f"All agent eval types complete ({total_existing} pairs) - skipping"
+                skip_msg = (
+                    f"All agent eval types complete ({total_existing} pairs) - skipping"
+                )
                 self.logger.info(skip_msg)
                 results["skipped"].append(skip_msg)
                 results["agent_qa_count"] = total_existing
@@ -257,24 +260,26 @@ class EvalGenerator:
                 try:
                     agent_type_status: Dict[str, Any] = {}
                     agent_saved_total = 0
-
-                    agent_qa_pairs_en, type_status = await self._generate_agent_qa_pairs(
-                        agent_config,
-                        existing_type_counts,
-                        force_regenerate,
-                        language="English",
+                    agent_qa_pairs_en, type_status = (
+                        await self._generate_agent_qa_pairs(
+                            agent_config,
+                            existing_type_counts,
+                            force_regenerate,
+                            language="English",
+                        )
                     )
                     saved_count_en = await self._save_agent_qa_pairs(
                         eval_token, agent_qa_pairs_en
                     )
                     agent_saved_total += saved_count_en
                     for t, info in type_status.items():
-                        aggregate = agent_type_status.get(t, {"count": 0, "action": "skipped"})
+                        aggregate = agent_type_status.get(
+                            t, {"count": 0, "action": "skipped"}
+                        )
                         if info.get("action") == "generated":
                             aggregate["count"] += info.get("count", 0)
                             aggregate["action"] = "generated"
                         agent_type_status[t] = aggregate
-
                     for language in self.languages:
                         if language == "English":
                             continue
@@ -289,19 +294,25 @@ class EvalGenerator:
                         )
                         agent_saved_total += saved_count
                         for t in self.AGENT_EVAL_TYPES:
-                            aggregate = agent_type_status.get(t, {"count": 0, "action": "skipped"})
+                            aggregate = agent_type_status.get(
+                                t, {"count": 0, "action": "skipped"}
+                            )
                             aggregate["count"] += self.AGENT_PAIRS_PER_TYPE
                             aggregate["action"] = "generated"
                             agent_type_status[t] = aggregate
-
                     existing_totals = {
-                        t: sum(existing_type_counts.get((t, lang), 0) for lang in self.languages)
+                        t: sum(
+                            existing_type_counts.get((t, lang), 0)
+                            for lang in self.languages
+                        )
                         for t in self.AGENT_EVAL_TYPES
                     }
                     results["agent_qa_count"] = total_existing + agent_saved_total
                     results["type_status"]["agent"] = {
                         t: {
-                            "action": agent_type_status.get(t, {}).get("action", "skipped"),
+                            "action": agent_type_status.get(t, {}).get(
+                                "action", "skipped"
+                            ),
                             "existing": existing_totals.get(t, 0),
                             "expected": self.AGENT_PAIRS_PER_TYPE * self.language_count,
                             "count": agent_type_status.get(t, {}).get("count", 0),
@@ -316,17 +327,17 @@ class EvalGenerator:
                     error_msg = f"Failed to generate agent QA pairs: {str(e)}"
                     self.logger.info(f"Error --> {error_msg}")
                     results["errors"].append(error_msg)
-
         if gen_eval_kb:
             print("Generating evals for knowledgebase")
             if not self.kn_token and self.gen_type == "knowledgebase":
                 raise ValueError(
                     "Knowledge base token(s) required for knowledgebase eval type"
                 )
-
             kb_list = self.kn_token if self.kn_token else []
             if not kb_list:
-                print(f"No KB tokens found - generating {self.KB_DEFAULT_PAIRS_TOTAL} default KB evals")
+                print(
+                    f"No KB tokens found - generating {self.KB_DEFAULT_PAIRS_TOTAL} default KB evals"
+                )
                 self.language = "English"
                 default_kb_qa_pairs_en = await self._generate_default_kb_evals()
                 all_default_pairs: List[QAPair] = list(default_kb_qa_pairs_en)
@@ -340,7 +351,9 @@ class EvalGenerator:
                         self._apply_rule_based_fields(translated_pairs, source="kb")
                         all_default_pairs.extend(translated_pairs)
                 results["kb_qa_count"] = len(all_default_pairs)
-                results["total_qa_count"] = results["agent_qa_count"] + results["kb_qa_count"]
+                results["total_qa_count"] = (
+                    results["agent_qa_count"] + results["kb_qa_count"]
+                )
                 print(f"Generated {results['kb_qa_count']} default KB QA pairs")
                 return results
             else:
@@ -349,23 +362,19 @@ class EvalGenerator:
                     if not eval_config:
                         print(f"KB eval config not found for: {kb_token} - skipping")
                         continue
-
                     eval_token = eval_config.get("eval_data", {}).get("space_token")
                     eval_id = eval_config.get("id")
                     if not eval_token:
                         print(f"KB eval token not found for: {kb_token} - skipping")
                         continue
-
                     kb_name = eval_config.get("eval_name", kb_token)
                     kb_name = kb_name.replace("Evals", "").strip()
-
                     try:
                         documents = await self._fetch_kb_documents(kb_token)
                         num_pages = len(documents)
                         existing_type_counts = self._get_existing_type_counts(
                             eval_token, KBQAPairModel
                         )
-
                         if num_pages > 0:
                             expected_per_type = (
                                 self.KB_PAIRS_PER_TYPE_PER_PAGE
@@ -380,7 +389,6 @@ class EvalGenerator:
                                 >= expected_per_type
                                 for t in self.KB_EVAL_TYPES
                             )
-
                             if all_types_complete and not force_regenerate:
                                 total_existing = sum(existing_type_counts.values())
                                 skip_msg = f"KB '{kb_token}' all types complete ({total_existing} pairs) - skipping"
@@ -399,32 +407,35 @@ class EvalGenerator:
                                     for t in self.KB_EVAL_TYPES
                                 }
                                 self._update_eval_status(
-                                    eval_id, "completed", extra_metadata={"already_generated": True}
+                                    eval_id,
+                                    "completed",
+                                    extra_metadata={"already_generated": True},
                                 )
                                 continue
-
                             print(f"Found {num_pages} pages for KB: {kb_name}")
                             kb_type_status: Dict[str, Any] = {}
                             kb_saved_total = 0
-
-                            kb_qa_pairs_en, type_status = await self._generate_kb_qa_pairs(
-                                documents,
-                                kb_name,
-                                existing_type_counts,
-                                force_regenerate,
-                                language="English",
+                            kb_qa_pairs_en, type_status = (
+                                await self._generate_kb_qa_pairs(
+                                    documents,
+                                    kb_name,
+                                    existing_type_counts,
+                                    force_regenerate,
+                                    language="English",
+                                )
                             )
                             saved_count_en = await self._save_kb_qa_pairs(
                                 eval_token, kb_qa_pairs_en
                             )
                             kb_saved_total += saved_count_en
                             for t, info in type_status.items():
-                                aggregate = kb_type_status.get(t, {"count": 0, "action": "skipped"})
+                                aggregate = kb_type_status.get(
+                                    t, {"count": 0, "action": "skipped"}
+                                )
                                 if info.get("action") == "generated":
                                     aggregate["count"] += info.get("count", 0)
                                     aggregate["action"] = "generated"
                                 kb_type_status[t] = aggregate
-
                             for language in self.languages:
                                 if language == "English":
                                     continue
@@ -433,22 +444,30 @@ class EvalGenerator:
                                 )
                                 if not translated_pairs:
                                     continue
-                                self._apply_rule_based_fields(translated_pairs, source="kb")
+                                self._apply_rule_based_fields(
+                                    translated_pairs, source="kb"
+                                )
                                 saved_count = await self._save_kb_qa_pairs(
                                     eval_token, translated_pairs
                                 )
                                 kb_saved_total += saved_count
                                 for t in self.KB_EVAL_TYPES:
-                                    aggregate = kb_type_status.get(t, {"count": 0, "action": "skipped"})
-                                    aggregate["count"] += (
-                                        self.KB_PAIRS_PER_TYPE_PER_PAGE * len(documents)
+                                    aggregate = kb_type_status.get(
+                                        t, {"count": 0, "action": "skipped"}
+                                    )
+                                    aggregate[
+                                        "count"
+                                    ] += self.KB_PAIRS_PER_TYPE_PER_PAGE * len(
+                                        documents
                                     )
                                     aggregate["action"] = "generated"
                                     kb_type_status[t] = aggregate
                             results["kb_qa_count"] += kb_saved_total
                             results["type_status"]["kb"][kb_token] = {
                                 t: {
-                                    "action": kb_type_status.get(t, {}).get("action", "skipped"),
+                                    "action": kb_type_status.get(t, {}).get(
+                                        "action", "skipped"
+                                    ),
                                     "count": kb_type_status.get(t, {}).get("count", 0),
                                     "expected": expected_per_type,
                                     "existing": sum(
@@ -459,7 +478,10 @@ class EvalGenerator:
                                 for t in self.KB_EVAL_TYPES
                             }
                             self._update_eval_status(
-                                eval_id, "completed", results["batch_id"], kb_saved_total
+                                eval_id,
+                                "completed",
+                                results["batch_id"],
+                                kb_saved_total,
                             )
                             print(
                                 f"Generated {kb_saved_total} KB QA pairs for {kb_name} ({num_pages} pages)"
@@ -480,7 +502,9 @@ class EvalGenerator:
                                     default_pairs_en, language
                                 )
                                 if translated_pairs:
-                                    self._apply_rule_based_fields(translated_pairs, source="kb")
+                                    self._apply_rule_based_fields(
+                                        translated_pairs, source="kb"
+                                    )
                                     all_default_pairs.extend(translated_pairs)
                             if all_default_pairs:
                                 saved_count = await self._save_kb_qa_pairs(
@@ -496,26 +520,40 @@ class EvalGenerator:
                                         "message": f"Generated {saved_count} default pairs (no documents)"
                                     },
                                 )
-                                print(f"Generated {saved_count} default KB QA pairs for {kb_name}")
+                                print(
+                                    f"Generated {saved_count} default KB QA pairs for {kb_name}"
+                                )
                             else:
                                 self._update_eval_status(
                                     eval_id,
                                     "completed",
-                                    extra_metadata={"message": "No documents found in knowledge base"},
+                                    extra_metadata={
+                                        "message": "No documents found in knowledge base"
+                                    },
                                 )
                     except Exception as e:
-                        error_msg = f"Failed to generate KB QA pairs for {kb_name}: {str(e)}"
+                        error_msg = (
+                            f"Failed to generate KB QA pairs for {kb_name}: {str(e)}"
+                        )
                         print(f"Error --> {error_msg}")
                         results["errors"].append(error_msg)
-
         results["total_qa_count"] = results["agent_qa_count"] + results["kb_qa_count"]
         results["eval_generation_status"] = self._build_eval_generation_status(
             results["type_status"]
         )
+        results["token_usage"] = {
+            **dict(self._token_usage),
+            "cost_usd": dict(self._cost_usd),
+        }
         self.logger.info(
-            f"Eval generation complete. Total: {results['total_qa_count']} QA pairs"
+            f"Eval generation complete. Total: {results['total_qa_count']} QA pairs | "
+            f"Tokens — prompt: {self._token_usage['prompt_tokens']}, "
+            f"completion: {self._token_usage['completion_tokens']}, "
+            f"total: {self._token_usage['total_tokens']} | "
+            f"Cost — input: ${self._cost_usd['input_cost']:.4f}, "
+            f"output: ${self._cost_usd['output_cost']:.4f}, "
+            f"total: ${self._cost_usd['total_cost']:.4f}"
         )
-
         return results
 
     def _build_eval_generation_status(
@@ -527,12 +565,13 @@ class EvalGenerator:
         """
         agent_types = type_status.get("agent", {})
         kb_types_by_token = type_status.get("kb", {})
-
         agent_type_list = []
         for t in self.AGENT_EVAL_TYPES:
             info = agent_types.get(t, {})
             current = info.get("existing", info.get("count", 0))
-            complete = info.get("action") == "skipped" or current >= self.AGENT_PAIRS_PER_TYPE
+            complete = (
+                info.get("action") == "skipped" or current >= self.AGENT_PAIRS_PER_TYPE
+            )
             agent_type_list.append(
                 {
                     "type": t,
@@ -543,7 +582,6 @@ class EvalGenerator:
                 }
             )
         agent_complete = all(t["complete"] for t in agent_type_list)
-
         kb_type_list = []
         for token_types in kb_types_by_token.values():
             for t, info in token_types.items():
@@ -560,7 +598,6 @@ class EvalGenerator:
                     }
                 )
         kb_complete = all(t["complete"] for t in kb_type_list) if kb_type_list else True
-
         return {
             "agent_evals": {
                 "types": agent_type_list,
@@ -573,8 +610,23 @@ class EvalGenerator:
                 "types": kb_type_list,
                 "status": "complete" if kb_complete else "incomplete",
             },
-            "overall_status": "complete" if (agent_complete and kb_complete) else "incomplete",
+            "overall_status": (
+                "complete" if (agent_complete and kb_complete) else "incomplete"
+            ),
         }
+
+    def _accumulate_cost(self, prompt_tokens: int, completion_tokens: int) -> None:
+        input_cost = (prompt_tokens / 1_000_000) * self._INPUT_PRICE_PER_1M
+        output_cost = (completion_tokens / 1_000_000) * self._OUTPUT_PRICE_PER_1M
+        self._cost_usd["input_cost"] = round(
+            self._cost_usd["input_cost"] + input_cost, 6
+        )
+        self._cost_usd["output_cost"] = round(
+            self._cost_usd["output_cost"] + output_cost, 6
+        )
+        self._cost_usd["total_cost"] = round(
+            self._cost_usd["input_cost"] + self._cost_usd["output_cost"], 6
+        )
 
     def _get_agent_config(self) -> Optional[Dict[str, Any]]:
         """Fetch agent configuration using ModelConfig."""
@@ -594,13 +646,11 @@ class EvalGenerator:
         if not search_service_url:
             self.logger.warning("SEARCH_SERVICE_URL not configured")
             return []
-
         url = f"{search_service_url}/api/v1/search/query/docs/"
         payload = {
             "query": "file",  # Generic query to fetch all documents
             "kn_token": [kb_token],
         }
-
         try:
             response = requests.post(url, json=payload, timeout=30)
             if response.status_code == 200:
@@ -636,10 +686,8 @@ class EvalGenerator:
         system_prompt = agent_config.get("system_prompt", "")
         persona = agent_config.get("persona", "")
         first_message = agent_config.get("first_message", "")
-
         all_qa_pairs: List[QAPair] = []
         type_status: Dict[str, Any] = {}
-
         for eval_type in self.AGENT_EVAL_TYPES:
             existing = existing_counts.get((eval_type, language), 0)
             if existing >= self.AGENT_PAIRS_PER_TYPE and not force_regenerate:
@@ -650,7 +698,6 @@ class EvalGenerator:
                     "language": language,
                 }
                 continue
-
             prompt = self._generate_agent_eval_prompt(
                 eval_type, system_prompt, persona, first_message
             )
@@ -665,187 +712,151 @@ class EvalGenerator:
                 "expected": self.AGENT_PAIRS_PER_TYPE,
                 "language": language,
             }
-
         return all_qa_pairs, type_status
 
     def _generate_agent_eval_prompt(
         self, eval_type: str, system_prompt: str, persona: str, first_message: str
     ) -> str:
         """Generate specialized prompt for agent evaluation types."""
-
         language_line = f"Write the question and answer in {self.language}."
-
         prompts = {
             "system_prompt_eval": f"""You are an expert at generating system prompt evaluation questions for voice agents.
-
 Given the agent configuration:
 **System Prompt:** {system_prompt}
 **Persona:** {persona}
 **Greeting Message:** {first_message}
-
 Generate exactly 5 question-answer pairs that test SYSTEM PROMPT EVALUATION. Include:
 1. Questions about agent's behavior based on system prompt
 2. Questions about agent's instructions and rules
 3. Questions about agent's operational boundaries
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "What are your instructions?", "answer": "Based on my system prompt...", "is_first_message": false, "intent": "understand system capabilities", "tool_name": null, "is_tool_call": false}}]""",
-
             "call_handover": f"""You are an expert at generating call handover evaluation questions for voice agents.
-
 Given the agent configuration:
 **System Prompt:** {system_prompt}
 **Persona:** {persona}
 **Greeting Message:** {first_message}
-
 Generate exactly 5 question-answer pairs that test CALL HANDOVER scenarios. Include:
 1. Requests to speak to human agent
 2. Complex issues requiring escalation
 3. Emergency situations
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "Can I speak to a human?", "answer": "I can transfer you...", "is_first_message": false, "intent": "request human agent", "tool_name": null, "is_tool_call": false}}]""",
-
             "followup": f"""You are an expert at generating follow-up evaluation questions for voice agents.
-
 Given the agent configuration:
 **System Prompt:** {system_prompt}
 **Persona:** {persona}
 **Greeting Message:** {first_message}
-
 Generate exactly 5 question-answer pairs that test FOLLOW-UP capabilities. Include:
 1. Questions about scheduling follow-ups
 2. Questions about callback requests
 3. Questions about ongoing support
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "Can you call me back?", "answer": "I can schedule...", "is_first_message": false, "intent": "request callback", "tool_name": null, "is_tool_call": false}}]""",
-
             "summary": f"""You are an expert at generating summary evaluation questions for voice agents.
-
 Given the agent configuration:
 **System Prompt:** {system_prompt}
 **Persona:** {persona}
 **Greeting Message:** {first_message}
-
 Generate exactly 5 question-answer pairs that test SUMMARY capabilities. Include:
 1. Questions about summarizing conversations
 2. Questions about key points extraction
 3. Questions about conversation overview
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "Can you summarize our conversation?", "answer": "To summarize...", "is_first_message": false, "intent": "request summary", "tool_name": null, "is_tool_call": false}}]""",
-
             "structured_data": f"""You are an expert at generating structured data evaluation questions for voice agents.
-
 Given the agent configuration:
 **System Prompt:** {system_prompt}
 **Persona:** {persona}
 **Greeting Message:** {first_message}
-
 Generate exactly 5 question-answer pairs that test STRUCTURED DATA extraction. Include:
 1. Questions about form filling
 2. Questions about information collection
 3. Questions about data validation
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "Can you help me fill this form?", "answer": "I can help you collect...", "is_first_message": false, "intent": "request form filling", "tool_name": null, "is_tool_call": false}}]""",
-
             "prompt_generation": f"""You are an expert at generating prompt generation evaluation questions for voice agents.
-
 Given the agent configuration:
 **System Prompt:** {system_prompt}
 **Persona:** {persona}
 **Greeting Message:** {first_message}
-
 Generate exactly 5 question-answer pairs that test PROMPT GENERATION. Include:
 1. Questions about creating prompts
 2. Questions about template generation
 3. Questions about content creation
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "Can you help me write a message?", "answer": "I can help you create...", "is_first_message": false, "intent": "request content creation", "tool_name": null, "is_tool_call": false}}]""",
-
             "analytics_fields": f"""You are an expert at generating analytics evaluation questions for voice agents.
-
 Given the agent configuration:
 **System Prompt:** {system_prompt}
 **Persona:** {persona}
 **Greeting Message:** {first_message}
-
 Generate exactly 5 question-answer pairs that test ANALYTICS capabilities. Include:
 1. Questions about metrics and measurements
 2. Questions about performance data
 3. Questions about usage statistics
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "What are my usage statistics?", "answer": "Based on my analytics...", "is_first_message": false, "intent": "request analytics data", "tool_name": null, "is_tool_call": false}}]""",
         }
-
         return prompts.get(eval_type, prompts["system_prompt_eval"])
 
     def _infer_intent(self, question: str, answer: str) -> str:
         text = f"{question} {answer}".lower()
         question_text = question.lower()
-
-        greet_re = r"\b(hi|hello|hey|namaste|good morning|good afternoon|good evening)\b"
+        greet_re = (
+            r"\b(hi|hello|hey|namaste|good morning|good afternoon|good evening)\b"
+        )
         end_re = r"\b(bye|goodbye|see you|take care|end the call|hang up|that's all|thank you,? bye)\b"
-        handover_re = r"\b(human|agent|representative|supervisor|manager|escalate|transfer)\b"
+        handover_re = (
+            r"\b(human|agent|representative|supervisor|manager|escalate|transfer)\b"
+        )
         callback_re = r"\b(call back|callback|call me back|schedule|reschedule|follow up|follow-up|call later|later today|tomorrow)\b"
         record_info_re = (
             r"\b(my name is|i am|i'm|call me|reach me at|my email|my phone|my number|"
             r"my contact|my address|preferred time|available at)\b"
         )
-
         if re.search(greet_re, question_text):
             return "greet the user"
         if re.search(end_re, text):
@@ -861,7 +872,9 @@ Output ONLY a valid JSON array:
     def _infer_is_first_message(self, question: str, answer: str, intent: str) -> bool:
         if intent == "greet the user":
             return True
-        greet_re = r"\b(hi|hello|hey|namaste|good morning|good afternoon|good evening)\b"
+        greet_re = (
+            r"\b(hi|hello|hey|namaste|good morning|good afternoon|good evening)\b"
+        )
         if re.search(greet_re, question.lower()):
             return True
         if re.search(greet_re, answer.lower()):
@@ -872,26 +885,49 @@ Output ONLY a valid JSON array:
         self, question: str, answer: str, intent: str
     ) -> Tuple[bool, Optional[str]]:
         text = f"{question} {answer}".lower()
-
         tool_rules = [
-            ("voicemail_detector", r"\b(voicemail|answering machine|leave a message|beep)\b"),
-            ("handover_tool", r"\b(human|agent|representative|supervisor|manager|escalate|transfer)\b"),
-            ("get_past_calls", r"\b(previous call|past call|last call|earlier conversation|last time)\b"),
-            ("create_followup_or_callback", r"\b(call back|callback|call me back|schedule|reschedule|follow up|follow-up|call later|later today|tomorrow)\b"),
-            ("end_call", r"\b(bye|goodbye|see you|take care|end the call|hang up|that's all|thank you,? bye)\b"),
-            ("record_user_info", r"\b(my name is|i am|i'm|call me|reach me at|my email|my phone|my number|my contact|my address|preferred time|available at)\b"),
-            ("report_breakdown", r"\b(repeat|didn't understand|did not understand|misunderstood|confused|what did you say)\b"),
-            ("mark_objective_achieved", r"\b(booked|confirmed|agreed|signed up|registered|payment done|done with it)\b"),
-            ("mark_topic_covered", r"\b(covered|we discussed|we talked about|that answers|topic covered)\b"),
+            (
+                "voicemail_detector",
+                r"\b(voicemail|answering machine|leave a message|beep)\b",
+            ),
+            (
+                "handover_tool",
+                r"\b(human|agent|representative|supervisor|manager|escalate|transfer)\b",
+            ),
+            (
+                "get_past_calls",
+                r"\b(previous call|past call|last call|earlier conversation|last time)\b",
+            ),
+            (
+                "create_followup_or_callback",
+                r"\b(call back|callback|call me back|schedule|reschedule|follow up|follow-up|call later|later today|tomorrow)\b",
+            ),
+            (
+                "end_call",
+                r"\b(bye|goodbye|see you|take care|end the call|hang up|that's all|thank you,? bye)\b",
+            ),
+            (
+                "record_user_info",
+                r"\b(my name is|i am|i'm|call me|reach me at|my email|my phone|my number|my contact|my address|preferred time|available at)\b",
+            ),
+            (
+                "report_breakdown",
+                r"\b(repeat|didn't understand|did not understand|misunderstood|confused|what did you say)\b",
+            ),
+            (
+                "mark_objective_achieved",
+                r"\b(booked|confirmed|agreed|signed up|registered|payment done|done with it)\b",
+            ),
+            (
+                "mark_topic_covered",
+                r"\b(covered|we discussed|we talked about|that answers|topic covered)\b",
+            ),
         ]
-
         for tool_name, pattern in tool_rules:
             if re.search(pattern, text):
                 return True, tool_name
-
         if intent == "answer user query using knowledge base":
             return True, "get_docs"
-
         return False, None
 
     def _apply_rule_based_fields(self, qa_pairs: List[QAPair], source: str) -> None:
@@ -913,10 +949,8 @@ Output ONLY a valid JSON array:
         Creates KB_DEFAULT_PAIRS_TOTAL pairs for comprehensive coverage.
         """
         all_qa_pairs: List[QAPair] = []
-
         for eval_type in self.KB_EVAL_TYPES:
             prompt = self._generate_default_kb_prompt(eval_type)
-
             try:
                 qa_pairs = await self._call_openai_for_qa_pairs(
                     prompt, max_pairs=10, eval_type=eval_type
@@ -924,7 +958,6 @@ Output ONLY a valid JSON array:
                 self._apply_rule_based_fields(qa_pairs, source="kb")
                 all_qa_pairs.extend(qa_pairs)
                 print(f"Generated {len(qa_pairs)} default {eval_type} QA pairs")
-
                 # Add additional pairs for variety to reach KB_DEFAULT_PAIRS_TOTAL
                 if len(all_qa_pairs) < self.KB_DEFAULT_PAIRS_TOTAL:
                     additional_pairs = await self._call_openai_for_qa_pairs(
@@ -932,21 +965,21 @@ Output ONLY a valid JSON array:
                     )
                     self._apply_rule_based_fields(additional_pairs, source="kb")
                     all_qa_pairs.extend(additional_pairs)
-                    print(f"Generated {len(additional_pairs)} additional {eval_type} QA pairs")
+                    print(
+                        f"Generated {len(additional_pairs)} additional {eval_type} QA pairs"
+                    )
             except Exception as e:
-                self.logger.warning(f"Failed to generate default {eval_type} QA pairs: {e}")
+                self.logger.warning(
+                    f"Failed to generate default {eval_type} QA pairs: {e}"
+                )
                 continue
-
         return all_qa_pairs
 
     def _generate_default_kb_prompt(self, eval_type: str) -> str:
         """Generate default prompt for KB evaluation types when no documents exist."""
-
         language_line = f"Write the question and answer in {self.language}."
-
         prompts = {
             "Introduction": f"""You are an expert at generating introduction evaluation questions for voice agents.
-
 Generate exactly 10 question-answer pairs that test INTRODUCTION capabilities. Include:
 1. Questions about agent introduction and identity
 2. Questions about agent purpose and role
@@ -954,18 +987,14 @@ Generate exactly 10 question-answer pairs that test INTRODUCTION capabilities. I
 4. Questions about initial interactions
 5. Questions about agent background
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
-[{"question": "Who are you?", "answer": "I am...", "is_first_message": true, "intent": "greet the user", "tool_name": null, "is_tool_call": false}]""",
-
+[{{"question": "Who are you?", "answer": "I am...", "is_first_message": true, "intent": "greet the user", "tool_name": null, "is_tool_call": false}}]""",
             "Q&A": f"""You are an expert at generating Q&A evaluation pairs for voice agents.
-
 Generate exactly 10 question-answer pairs that test Q&A SCENARIOS. Include:
 1. Questions about common user queries
 2. Questions about frequently asked topics
@@ -973,18 +1002,14 @@ Generate exactly 10 question-answer pairs that test Q&A SCENARIOS. Include:
 4. Questions about information requests
 5. Questions about general inquiries
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
-[{"question": "What can you help with?", "answer": "I can help you with...", "is_first_message": false, "intent": "ask about capabilities", "tool_name": null, "is_tool_call": false}]""",
-
+[{{"question": "What can you help with?", "answer": "I can help you with...", "is_first_message": false, "intent": "ask about capabilities", "tool_name": null, "is_tool_call": false}}]""",
             "ObjectionHandling": f"""You are an expert at generating objection handling evaluation questions for voice agents.
-
 Generate exactly 10 question-answer pairs that test OBJECTION HANDLING. Include:
 1. Questions about user concerns
 2. Questions about handling objections
@@ -992,17 +1017,14 @@ Generate exactly 10 question-answer pairs that test OBJECTION HANDLING. Include:
 4. Questions about addressing complaints
 5. Questions about managing resistance
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
-[{"question": "What if I don't want to proceed?", "answer": "I understand your concern...", "is_first_message": false, "intent": "express hesitation", "tool_name": null, "is_tool_call": false}]""",
+[{{"question": "What if I don't want to proceed?", "answer": "I understand your concern...", "is_first_message": false, "intent": "express hesitation", "tool_name": null, "is_tool_call": false}}]""",
         }
-
         return prompts.get(eval_type, prompts["Introduction"])
 
     async def _generate_kb_qa_pairs(
@@ -1022,7 +1044,6 @@ Output ONLY a valid JSON array:
         num_pages = len(documents)
         expected_per_type = self.KB_PAIRS_PER_TYPE_PER_PAGE * num_pages
         type_status: Dict[str, Any] = {}
-
         for eval_type in self.KB_EVAL_TYPES:
             existing = existing_counts.get((eval_type, language), 0)
             if existing >= expected_per_type and not force_regenerate:
@@ -1033,16 +1054,13 @@ Output ONLY a valid JSON array:
                     "language": language,
                 }
                 continue
-
             type_pairs: List[QAPair] = []
             for doc in documents:
                 content = doc.get("content", "")
                 if not content or len(content.strip()) < 50:
                     continue
-
                 if len(content) > 8000:
                     content = content[:8000] + "..."
-
                 prompt = self._generate_kb_eval_prompt(eval_type, content, kb_name)
                 try:
                     qa_pairs = await self._call_openai_for_qa_pairs(
@@ -1055,7 +1073,6 @@ Output ONLY a valid JSON array:
                 except Exception as e:
                     self.logger.warning(f"Failed to generate QA for document: {e}")
                     continue
-
             all_qa_pairs.extend(type_pairs)
             type_status[eval_type] = {
                 "action": "generated",
@@ -1063,84 +1080,66 @@ Output ONLY a valid JSON array:
                 "expected": expected_per_type,
                 "language": language,
             }
-
         return all_qa_pairs, type_status
 
     def _generate_kb_eval_prompt(
         self, eval_type: str, content: str, kb_name: str
     ) -> str:
         """Generate specialized prompt for KB document evaluation types."""
-
         language_line = f"Write the question and answer in {self.language}."
-
         prompts = {
             "Introduction": f"""You are an expert at extracting introduction evaluation questions from documents.
-
 Given the following document from knowledge base "{kb_name}":
 ---
 {content}
 ---
-
 Generate exactly 3 question-answer pairs that test INTRODUCTION content. Include:
 1. Questions about overview information
 2. Questions about background context
 3. Questions about purpose and scope
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "What is this about?", "answer": "This document covers...", "is_first_message": false, "intent": "ask about document overview", "tool_name": null, "is_tool_call": false}}]""",
-
             "Q&A": f"""You are an expert at extracting Q&A evaluation pairs from documents.
-
 Given the following document from knowledge base "{kb_name}":
 ---
 {content}
 ---
-
 Generate exactly 3 question-answer pairs that test Q&A SCENARIOS. Include:
 1. Questions about common queries
 2. Questions about frequently asked topics
 3. Questions about typical user questions
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "What are common questions?", "answer": "Based on document...", "is_first_message": false, "intent": "ask about common questions", "tool_name": null, "is_tool_call": false}}]""",
-
             "ObjectionHandling": f"""You are an expert at extracting objection handling scenarios from documents.
-
 Given the following document from knowledge base "{kb_name}":
 ---
 {content}
 ---
-
 Generate exactly 3 question-answer pairs that test OBJECTION HANDLING. Include:
 1. Questions about addressing concerns
 2. Questions about handling objections
 3. Questions about resolving issues
 {language_line}
-
 For each pair, also generate:
 - is_first_message: boolean (true if this is the first message)
 - intent: string (describing the user's intent)
 - tool_name: string or null (name of tool if applicable)
 - is_tool_call: boolean (true if this involves a tool call)
-
 Output ONLY a valid JSON array:
 [{{"question": "What if there's an issue?", "answer": "The document suggests...", "is_first_message": false, "intent": "express concern", "tool_name": null, "is_tool_call": false}}]""",
         }
-
         return prompts.get(eval_type, prompts["Introduction"])
 
     async def _call_openai_for_qa_pairs(
@@ -1162,11 +1161,18 @@ Output ONLY a valid JSON array:
                 temperature=0.7,
                 max_tokens=4000,
             )
-
+            if response.usage:
+                self._token_usage["prompt_tokens"] += response.usage.prompt_tokens
+                self._token_usage[
+                    "completion_tokens"
+                ] += response.usage.completion_tokens
+                self._token_usage["total_tokens"] += response.usage.total_tokens
+                self._accumulate_cost(
+                    response.usage.prompt_tokens, response.usage.completion_tokens
+                )
             content = response.choices[0].message.content
             if not content:
                 return []
-
             # Clean up the response (remove markdown code blocks if present)
             content = content.strip()
             if content.startswith("```json"):
@@ -1176,13 +1182,10 @@ Output ONLY a valid JSON array:
             if content.endswith("```"):
                 content = content[:-3]
             content = content.strip()
-
             qa_data = json.loads(content)
-
             if not isinstance(qa_data, list):
                 self.logger.warning("OpenAI response is not a list")
                 return []
-
             qa_pairs = []
             for item in qa_data[:max_pairs]:
                 if isinstance(item, dict) and "question" in item and "answer" in item:
@@ -1197,9 +1200,7 @@ Output ONLY a valid JSON array:
                             eval_type=eval_type,
                         )
                     )
-
             return qa_pairs
-
         except json.JSONDecodeError as e:
             self.logger.info(f"Failed to parse OpenAI response as JSON: {e}")
             return []
@@ -1207,21 +1208,14 @@ Output ONLY a valid JSON array:
             self.logger.info(f"OpenAI API error: {e}")
             raise
 
-    async def _translate_qa_pairs(
-        self, qa_pairs: List[QAPair], target_language: str
+    async def _translate_batch(
+        self,
+        batch: List[QAPair],
+        target_language: str,
+        formality_note: str,
     ) -> List[QAPair]:
-        if not qa_pairs:
-            return []
-
-        formality_note = "Use formal register (e.g., Hindi 'aap')."
-        if target_language.lower() != "hindi":
-            formality_note = "Use formal, respectful register."
-
-        items = [
-            {"question": qa.question, "answer": qa.answer}
-            for qa in qa_pairs
-        ]
-
+        """Translate a single batch of QA pairs (max 10) to target_language."""
+        items = [{"question": qa.question, "answer": qa.answer} for qa in batch]
         prompt = (
             f"Translate the following Q&A pairs from English to {target_language}. "
             "Preserve meaning exactly. Do not add or remove questions. "
@@ -1229,7 +1223,6 @@ Output ONLY a valid JSON array:
             'and objects of shape {"question": "...", "answer": "..."}.\n\n'
             f"{json.dumps(items, ensure_ascii=False)}"
         )
-
         response = await self.openai_client.chat.completions.create(
             model=self.OPENAI_MODEL,
             messages=[
@@ -1245,7 +1238,13 @@ Output ONLY a valid JSON array:
             temperature=0.2,
             max_tokens=4000,
         )
-
+        if response.usage:
+            self._token_usage["prompt_tokens"] += response.usage.prompt_tokens
+            self._token_usage["completion_tokens"] += response.usage.completion_tokens
+            self._token_usage["total_tokens"] += response.usage.total_tokens
+            self._accumulate_cost(
+                response.usage.prompt_tokens, response.usage.completion_tokens
+            )
         content = response.choices[0].message.content or ""
         content = content.strip()
         if content.startswith("```json"):
@@ -1255,25 +1254,24 @@ Output ONLY a valid JSON array:
         if content.endswith("```"):
             content = content[:-3]
         content = content.strip()
-
         try:
             translated = json.loads(content)
         except json.JSONDecodeError:
-            self.logger.warning("Failed to parse translation JSON")
+            self.logger.warning(
+                f"Failed to parse translation JSON for batch of {len(batch)}"
+            )
             return []
-
         if not isinstance(translated, list):
             return []
-
-        translated_pairs: List[QAPair] = []
-        for original, item in zip(qa_pairs, translated):
+        result: List[QAPair] = []
+        for original, item in zip(batch, translated):
             if not isinstance(item, dict):
                 continue
             q = item.get("question")
             a = item.get("answer")
             if not isinstance(q, str) or not isinstance(a, str):
                 continue
-            translated_pairs.append(
+            result.append(
                 QAPair(
                     question=q.strip(),
                     answer=a.strip(),
@@ -1286,16 +1284,43 @@ Output ONLY a valid JSON array:
                     language=target_language,
                 )
             )
+        return result
 
-        return translated_pairs
+    async def _translate_qa_pairs(
+        self, qa_pairs: List[QAPair], target_language: str, batch_size: int = 10
+    ) -> List[QAPair]:
+        """
+        Translate QA pairs in batches of batch_size to avoid max_tokens cutoff.
+        """
+        if not qa_pairs:
+            return []
+        formality_note = (
+            "Use formal register (e.g., Hindi 'aap')."
+            if target_language.lower() == "hindi"
+            else "Use formal, respectful register."
+        )
+        all_translated: List[QAPair] = []
+        for i in range(0, len(qa_pairs), batch_size):
+            batch = qa_pairs[i : i + batch_size]
+            translated = await self._translate_batch(
+                batch, target_language, formality_note
+            )
+            all_translated.extend(translated)
+        self.logger.info(
+            f"Translated {len(all_translated)}/{len(qa_pairs)} pairs to {target_language}"
+        )
+        return all_translated
 
-    async def _save_agent_qa_pairs(self, eval_token: str, qa_pairs: List[QAPair]) -> int:
+    async def _save_agent_qa_pairs(
+        self, eval_token: str, qa_pairs: List[QAPair]
+    ) -> int:
         """
         Save Agent QA pairs to agent_qa_pairs collection.
-
         Returns:
             Number of QA pairs saved
         """
+        if not qa_pairs:
+            return 0
         final_data = [
             {
                 "question": qa.question,
@@ -1319,10 +1344,11 @@ Output ONLY a valid JSON array:
     async def _save_kb_qa_pairs(self, eval_token: str, qa_pairs: List[QAPair]) -> int:
         """
         Save KB QA pairs to kb_qa_pairs collection.
-
         Returns:
             Number of QA pairs saved
         """
+        if not qa_pairs:
+            return 0
         final_data = [
             {
                 "question": qa.question,
@@ -1347,7 +1373,6 @@ Output ONLY a valid JSON array:
 def get_agent_qa_pairs(agent_id: str) -> List[Dict[str, Any]]:
     """
     Get all active QA pairs from agent_qa_pairs collection.
-
     Returns:
         List of QA pair dictionaries with question, answer, keywords
     """
@@ -1359,7 +1384,6 @@ def get_agent_qa_pairs(agent_id: str) -> List[Dict[str, Any]]:
         qa_pairs: List[AgentQAPairModel.Meta.model] = list(
             AgentQAPairModel(eval_token).find(status="active")
         )
-
         return [
             {
                 "question": qa.question,
@@ -1383,11 +1407,9 @@ def get_agent_qa_pairs(agent_id: str) -> List[Dict[str, Any]]:
 def get_kb_qa_pairs(agent_id: str, kb_token: str = None) -> List[Dict[str, Any]]:
     """
     Get all active QA pairs from kb_qa_pairs collection.
-
     Args:
         agent_id: Agent handle
         kb_token: Optional KB token to filter by specific knowledge base
-
     Returns:
         List of QA pair dictionaries with question, answer, keywords
     """
@@ -1435,7 +1457,6 @@ def get_kb_qa_pairs(agent_id: str, kb_token: str = None) -> List[Dict[str, Any]]
 def get_all_qa_pairs_for_agent(agent_id: str) -> List[Dict[str, Any]]:
     """
     Get all active QA pairs (both agent and KB) for an agent.
-
     Returns:
         Combined list of QA pairs from both collections
     """

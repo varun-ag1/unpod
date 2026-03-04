@@ -313,12 +313,13 @@ class LiveKitLiteAgent(Agent):
 
                 for attempt in range(max_attempts):
                     try:
-                        from livekit.agents.beta.workflows import WarmTransferTask
+                        from super.core.voice.wrappers.warm_transfer import WarmTransferAgentTask
+                        # from livekit.agents.beta.workflows import WarmTransferTask
                         from super.core.voice.prompts.guidelines import (
                             HANOVER_INSTRUCTIONS,
                         )
 
-                        transfer = WarmTransferTask(
+                        transfer = WarmTransferAgentTask(
                             target_phone_number=number,
                             sip_trunk_id=trunk_id,
                             chat_ctx=self.chat_ctx,
@@ -1146,7 +1147,7 @@ class LiveKitLiteAgent(Agent):
         """
 
         # Realtime mode: bypass all text filtering, stream raw text to TTS
-        if self._is_realtime_mode:
+        if getattr(self, "_is_realtime_mode", False):
             async for frame in Agent.default.tts_node(self, text, model_settings):
                 yield frame
             return

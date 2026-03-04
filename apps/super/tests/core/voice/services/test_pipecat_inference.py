@@ -217,3 +217,54 @@ def test_pipecat_tts_provider_dispatch(monkeypatch):
     factory = ServiceFactory(config)
     tts = factory._create_tts_service()
     assert getattr(tts, "model", None) == "gpt-4o-mini-tts"
+
+
+def test_gemini_realtime_same_tts_model_forces_full_realtime(monkeypatch):
+    root = Path(__file__).resolve().parents[4]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    for key in list(sys.modules.keys()):
+        if key == "super" or key.startswith("super."):
+            sys.modules.pop(key, None)
+
+    _install_pipecat_stubs(monkeypatch)
+
+    import super.core.voice.pipecat.services as services_mod
+
+    monkeypatch.setattr(services_mod, "GEMINI_LIVE_AVAILABLE", True)
+    monkeypatch.setattr(services_mod, "GEMINI_LIVE_API_AVAILABLE", True)
+    monkeypatch.setattr(services_mod, "GEMINI_LIVE_VERTEX_AVAILABLE", False)
+
+    def _fake_settings(self, _instructions, _model, _voice):
+        return None, []
+
+    def _fake_api(self, _instructions, _model, _voice, _params, _tools):
+        return object()
+
+    monkeypatch.setattr(
+        services_mod.ServiceFactory,
+        "get_gemini_realtime_settings",
+        _fake_settings,
+    )
+    monkeypatch.setattr(
+        services_mod.ServiceFactory,
+        "_create_gemini_live_api",
+        _fake_api,
+    )
+
+    realtime_model = "gemini-2.5-flash-native-audio-preview-12-2025"
+    config = {
+        "llm_provider": "google",
+        "llm_model": realtime_model,
+        "tts_provider": "google",
+        "tts_model": realtime_model,
+        # Even if mixed mode is explicitly set, same realtime model should
+        # run full realtime and avoid separate streaming TTS.
+        "mixed_realtime_mode": True,
+    }
+
+    factory = services_mod.ServiceFactory(config, use_realtime=True)
+    llm = factory._create_gemini_live_llm_service("test prompt")
+
+    assert llm is not None
+    assert factory.mixed_realtime_mode is False

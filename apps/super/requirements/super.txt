@@ -24,13 +24,13 @@ aiohttp==3.13.3
     #   aiobotocore
     #   cartesia
     #   deepgram-sdk
-    #   google-genai
     #   litellm
     #   livekit-agents
     #   livekit-api
     #   livekit-plugins-gladia
     #   livekit-plugins-groq
     #   llama-index-core
+    #   modal
     #   pipecat-ai
 aioitertools==0.13.0
     # via aiobotocore
@@ -46,9 +46,11 @@ alembic==1.18.4
     # via
     #   optuna
     #   prefect
+annotated-doc==0.0.4
+    # via fastapi
 annotated-types==0.7.0
     # via pydantic
-anthropic==0.83.0
+anthropic==0.84.0
     # via
     #   langchain-anthropic
     #   livekit-plugins-anthropic
@@ -62,12 +64,17 @@ anyio==4.12.1
     #   google-genai
     #   groq
     #   httpx
+    #   mcp
     #   openai
     #   prefect
+    #   pydantic-evals
+    #   sse-starlette
     #   starlette
     #   watchfiles
 apprise==1.9.7
     # via prefect
+argcomplete==3.6.3
+    # via pydantic-ai-slim
 asgi-lifespan==2.1.0
     # via prefect
 async-timeout==5.0.1
@@ -89,7 +96,7 @@ av==16.1.0
     # via livekit-agents
 aws-sdk-signers==0.1.0
     # via smithy-aws-core
-aws-sdk-transcribe-streaming==0.3.0
+aws-sdk-transcribe-streaming==0.4.0
     # via livekit-plugins-aws
 awscrt==0.28.4
     # via smithy-http
@@ -101,32 +108,43 @@ backoff==2.2.1
     # via posthog
 banks==2.4.1
     # via llama-index-core
+bcrypt==5.0.0
+    # via chromadb
 beautifulsoup4==4.14.3
     # via
     #   llama-index-readers-file
     #   markdownify
     #   markitdown
 boto3==1.40.61
-    # via aiobotocore
+    # via
+    #   aiobotocore
+    #   pydantic-ai-slim
 botocore==1.40.61
     # via
     #   aiobotocore
     #   boto3
     #   s3transfer
+build==1.4.0
+    # via chromadb
 cachetools==6.2.6
     # via
     #   dspy
     #   prefect
 cartesia==2.0.17
     # via pipecat-ai
-certifi==2026.1.4
+cbor2==5.8.0
+    # via modal
+certifi==2026.2.25
     # via
     #   apprise
     #   httpcore
     #   httpx
+    #   kubernetes
     #   livekit-agents
     #   llama-cloud
+    #   modal
     #   requests
+    #   sentry-sdk
     #   speechmatics-voice
 cffi==2.0.0
     # via
@@ -137,6 +155,8 @@ charset-normalizer==3.4.4
     # via
     #   markitdown
     #   requests
+chromadb==1.5.1
+    # via super
 click==8.3.1
     # via
     #   apprise
@@ -144,8 +164,10 @@ click==8.3.1
     #   livekit-agents
     #   llama-cloud-services
     #   magika
+    #   modal
     #   nltk
     #   prefect
+    #   rich-toolkit
     #   super
     #   typer
     #   uvicorn
@@ -153,31 +175,35 @@ cloudpickle==3.1.2
     # via
     #   dspy
     #   prefect
-cohere==5.20.6
+cohere==5.20.7 ; sys_platform != 'emscripten'
     # via pydantic-ai-slim
 colorama==0.4.6
     # via
+    #   build
     #   click
     #   colorlog
     #   griffe
     #   livekit-agents
     #   loguru
     #   pytest
-    #   rich
     #   tqdm
     #   uvicorn
 coloredlogs==15.0.1
     # via onnxruntime
-colorlog==4.8.0
+colorlog==6.10.1
     # via optuna
-commonmark==0.9.1
-    # via rich
 coolname==2.2.0
     # via prefect
+coverage==7.13.4
 cryptography==46.0.5
     # via
     #   google-auth
     #   prefect
+    #   pyjwt
+cuda-bindings==12.9.4 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+cuda-pathfinder==1.4.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via cuda-bindings
 dataclasses-json==0.6.7
     # via
     #   deepgram-sdk
@@ -221,31 +247,40 @@ docstring-parser==0.17.0
     #   pipecat-ai-flows
 dspy==3.1.3
     # via super
+durationpy==0.10
+    # via kubernetes
 email-validator==2.3.0
-    # via fastapi
+    # via
+    #   fastapi
+    #   pydantic
 eval-type-backport==0.3.1
     # via
     #   livekit-agents
     #   mistralai
     #   pydantic-ai-slim
-exa-py==2.4.0
+exa-py==2.5.0
     # via super
 exceptiongroup==1.3.1
     # via prefect
-fastapi==0.115.14
+fastapi==0.127.1
     # via
     #   pipecat-ai
     #   pipecat-ai-small-webrtc-prebuilt
     #   prefect
-fastapi-cli==0.0.5
+fastapi-cli==0.0.24
     # via fastapi
-fastavro==1.12.1
+fastapi-cloud-cli==0.14.0
+    # via fastapi-cli
+fastar==0.8.0
+    # via fastapi-cloud-cli
+fastavro==1.12.1 ; sys_platform != 'emscripten'
     # via cohere
 fastuuid==0.14.0
     # via litellm
 filelock==3.24.3
     # via
     #   huggingface-hub
+    #   torch
     #   transformers
 filetype==1.2.0
     # via
@@ -262,6 +297,7 @@ fsspec==2026.2.0
     #   huggingface-hub
     #   llama-index-core
     #   prefect
+    #   torch
 future==1.0.0
     # via pyloudnorm
 gepa==0.0.26
@@ -286,7 +322,7 @@ google-cloud-texttospeech==2.34.0
     # via
     #   livekit-plugins-google
     #   pipecat-ai
-google-genai==1.64.0
+google-genai==1.65.0
     # via
     #   livekit-plugins-google
     #   pipecat-ai
@@ -305,10 +341,13 @@ griffe==1.15.0
     #   banks
     #   prefect
     #   pydantic-ai-slim
-groq==1.0.0
-    # via pydantic-ai-slim
-grpcio==1.78.1
+groq==0.23.1
     # via
+    #   pipecat-ai
+    #   pydantic-ai-slim
+grpcio==1.78.0
+    # via
+    #   chromadb
     #   google-api-core
     #   google-cloud-speech
     #   google-cloud-texttospeech
@@ -317,13 +356,17 @@ grpcio==1.78.1
     #   qdrant-client
 grpcio-status==1.71.2
     # via google-api-core
+grpclib==0.4.9
+    # via modal
 h11==0.16.0
     # via
     #   httpcore
     #   uvicorn
 h2==4.3.0
-    # via httpx
-hf-xet==1.2.0 ; platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
+    # via
+    #   grpclib
+    #   httpx
+hf-xet==1.3.1 ; platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
     # via huggingface-hub
 hpack==4.1.0
     # via h2
@@ -338,10 +381,12 @@ httpx==0.28.1
     # via
     #   anthropic
     #   cartesia
+    #   chromadb
     #   cohere
     #   deepgram-sdk
     #   exa-py
     #   fastapi
+    #   fastapi-cloud-cli
     #   google-genai
     #   groq
     #   langgraph-sdk
@@ -350,17 +395,22 @@ httpx==0.28.1
     #   livekit-plugins-anthropic
     #   llama-cloud
     #   llama-index-core
+    #   mcp
     #   mistralai
     #   openai
     #   prefect
     #   pydantic-ai-slim
     #   pydantic-graph
     #   qdrant-client
+    #   sarvamai
     #   tavily-python
 httpx-sse==0.4.0
-    # via cartesia
+    # via
+    #   cartesia
+    #   mcp
 huggingface-hub==0.36.2
     # via
+    #   sentence-transformers
     #   tokenizers
     #   transformers
 humanfriendly==10.0
@@ -378,12 +428,14 @@ idna==3.11
     #   httpx
     #   requests
     #   yarl
-ijson==3.4.0.post0
+ijson==3.5.0
     # via smithy-json
 importlib-metadata==8.7.1
     # via
     #   litellm
     #   opentelemetry-api
+importlib-resources==6.5.2
+    # via chromadb
 inflection==0.5.1
     # via super
 iniconfig==2.3.0
@@ -402,6 +454,7 @@ jinja2==3.1.6
     #   litellm
     #   livekit-plugins-turn-detector
     #   prefect
+    #   torch
 jinja2-humanize-extension==0.4.0
     # via prefect
 jiter==0.13.0
@@ -414,7 +467,9 @@ jmespath==1.1.0
     #   boto3
     #   botocore
 joblib==1.5.3
-    # via nltk
+    # via
+    #   nltk
+    #   scikit-learn
 json-repair==0.58.0
     # via dspy
 jsonpatch==1.33
@@ -425,15 +480,19 @@ jsonpointer==3.0.0
     # via jsonpatch
 jsonschema==4.26.0
     # via
+    #   chromadb
     #   litellm
+    #   mcp
     #   prefect
 jsonschema-specifications==2025.9.1
     # via jsonschema
+kubernetes==35.0.0
+    # via chromadb
 langchain==1.2.10
     # via super
-langchain-anthropic==1.3.3
+langchain-anthropic==1.3.4
     # via super
-langchain-core==1.2.15
+langchain-core==1.2.16
     # via
     #   langchain
     #   langchain-anthropic
@@ -454,11 +513,11 @@ langgraph-checkpoint==4.0.0
     #   langgraph-prebuilt
 langgraph-prebuilt==1.0.8
     # via langgraph
-langgraph-sdk==0.3.8
+langgraph-sdk==0.3.9
     # via langgraph
-langsmith==0.7.6
+langsmith==0.7.7
     # via langchain-core
-litellm==1.81.14
+litellm==1.81.16
     # via
     #   dspy
     #   llama-index-llms-litellm
@@ -559,7 +618,7 @@ llama-index-instrumentation==0.4.2
     # via llama-index-workflows
 llama-index-llms-litellm==0.6.3
     # via super
-llama-index-llms-openai==0.6.19
+llama-index-llms-openai==0.6.21
     # via
     #   llama-index
     #   llama-index-cli
@@ -574,7 +633,9 @@ llama-parse==0.6.54
 llvmlite==0.44.0
     # via numba
 logfire-api==4.25.0
-    # via pydantic-graph
+    # via
+    #   pydantic-evals
+    #   pydantic-graph
 loguru==0.7.3
     # via
     #   pipecat-ai
@@ -588,6 +649,8 @@ markdown==3.10.2
     # via
     #   apprise
     #   pipecat-ai
+markdown-it-py==4.0.0
+    # via rich
 markdownify==1.2.2
     # via markitdown
 markitdown==0.1.5
@@ -598,10 +661,17 @@ markupsafe==3.0.3
     #   mako
 marshmallow==3.26.2
     # via dataclasses-json
+mcp==1.26.0
+    # via pydantic-ai-slim
+mdurl==0.1.2
+    # via markdown-it-py
 mem0ai==1.0.4
     # via super
 mistralai==1.12.4
     # via pydantic-ai-slim
+mmh3==5.2.0
+    # via chromadb
+modal==1.3.4
 mpmath==1.3.0
     # via sympy
 msgpack==1.1.2
@@ -610,6 +680,7 @@ multidict==6.7.1
     # via
     #   aiobotocore
     #   aiohttp
+    #   grpclib
     #   yarl
 mypy-extensions==1.1.0
     # via typing-inspect
@@ -618,8 +689,10 @@ nest-asyncio==1.6.0
     #   livekit-agents
     #   llama-index-core
 networkx==3.6.1
-    # via llama-index-core
-nltk==3.9.2
+    # via
+    #   llama-index-core
+    #   torch
+nltk==3.9.3
     # via
     #   llama-index
     #   llama-index-core
@@ -630,6 +703,7 @@ numba==0.61.2
     #   resampy
 numpy==2.2.6
     # via
+    #   chromadb
     #   dspy
     #   livekit
     #   livekit-agents
@@ -648,22 +722,64 @@ numpy==2.2.6
     #   pyloudnorm
     #   qdrant-client
     #   resampy
+    #   scikit-learn
     #   scipy
+    #   sentence-transformers
     #   soundfile
     #   soxr
     #   speechmatics-voice
     #   super
     #   transformers
+nvidia-cublas-cu12==12.8.4.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via
+    #   nvidia-cudnn-cu12
+    #   nvidia-cusolver-cu12
+    #   torch
+nvidia-cuda-cupti-cu12==12.8.90 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-cuda-nvrtc-cu12==12.8.93 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-cuda-runtime-cu12==12.8.90 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-cudnn-cu12==9.10.2.21 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-cufft-cu12==11.3.3.83 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-cufile-cu12==1.13.1.3 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-curand-cu12==10.3.9.90 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-cusolver-cu12==11.7.3.90 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-cusparse-cu12==12.5.8.93 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via
+    #   nvidia-cusolver-cu12
+    #   torch
+nvidia-cusparselt-cu12==0.7.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-nccl-cu12==2.27.5 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-nvjitlink-cu12==12.8.93 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via
+    #   nvidia-cufft-cu12
+    #   nvidia-cusolver-cu12
+    #   nvidia-cusparse-cu12
+    #   torch
+nvidia-nvshmem-cu12==3.4.5 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
+nvidia-nvtx-cu12==12.8.90 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
 oauthlib==3.3.1
     # via requests-oauthlib
 onnxruntime==1.23.2
     # via
+    #   chromadb
     #   livekit-plugins-silero
     #   livekit-plugins-turn-detector
     #   magika
     #   pipecat-ai
     #   speechmatics-voice
-openai==2.21.0
+openai==2.24.0
     # via
     #   dspy
     #   exa-py
@@ -679,6 +795,7 @@ openai==2.21.0
     #   super
 opentelemetry-api==1.39.1
     # via
+    #   chromadb
     #   livekit-agents
     #   mistralai
     #   opentelemetry-exporter-otlp-proto-grpc
@@ -694,7 +811,9 @@ opentelemetry-exporter-otlp-proto-common==1.39.1
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
 opentelemetry-exporter-otlp-proto-grpc==1.39.1
-    # via opentelemetry-exporter-otlp
+    # via
+    #   chromadb
+    #   opentelemetry-exporter-otlp
 opentelemetry-exporter-otlp-proto-http==1.39.1
     # via
     #   mistralai
@@ -706,6 +825,7 @@ opentelemetry-proto==1.39.1
     #   opentelemetry-exporter-otlp-proto-http
 opentelemetry-sdk==1.39.1
     # via
+    #   chromadb
     #   livekit-agents
     #   mistralai
     #   opentelemetry-exporter-otlp-proto-grpc
@@ -716,6 +836,7 @@ optuna==4.7.0
     # via dspy
 orjson==3.11.7
     # via
+    #   chromadb
     #   dspy
     #   fastapi
     #   langgraph-sdk
@@ -723,8 +844,11 @@ orjson==3.11.7
     #   prefect
 ormsgpack==1.12.2
     # via langgraph-checkpoint
+overrides==7.7.0
+    # via chromadb
 packaging==25.0
     # via
+    #   build
     #   deprecation
     #   huggingface-hub
     #   langchain-core
@@ -741,19 +865,19 @@ pathspec==1.0.4
     # via prefect
 pendulum==3.2.0 ; python_full_version < '3.13'
     # via prefect
-pillow==12.1.1
+pillow==11.3.0
     # via
     #   livekit-agents
     #   llama-index-core
     #   pipecat-ai
-pipecat-ai==0.0.103
+pipecat-ai==0.0.102
     # via
     #   pipecat-ai-flows
     #   pipecat-ai-whisker
     #   super
 pipecat-ai-flows==0.0.22
     # via super
-pipecat-ai-small-webrtc-prebuilt==2.2.0
+pipecat-ai-small-webrtc-prebuilt==2.3.0
     # via pipecat-ai
 pipecat-ai-whisker==0.0.11
     # via super
@@ -766,14 +890,18 @@ pluggy==1.6.0
     # via pytest
 portalocker==3.2.0
     # via qdrant-client
-posthog==7.9.3
-    # via mem0ai
+posthog==5.4.0
+    # via
+    #   chromadb
+    #   mem0ai
 prefect==3.4.23
     # via super
 prometheus-client==0.24.1
     # via
     #   livekit-agents
     #   prefect
+prompt-toolkit==3.0.52
+    # via pydantic-ai-slim
 propcache==0.4.1
     # via
     #   aiohttp
@@ -795,6 +923,7 @@ protobuf==5.29.6
     #   livekit-api
     #   livekit-protocol
     #   mem0ai
+    #   modal
     #   onnxruntime
     #   opentelemetry-proto
     #   pipecat-ai
@@ -810,6 +939,8 @@ pyasn1==0.6.2
     #   rsa
 pyasn1-modules==0.4.2
     # via google-auth
+pybase64==1.4.3
+    # via chromadb
 pycparser==3.0 ; implementation_name != 'PyPy'
     # via cffi
 pydantic==2.12.5
@@ -817,10 +948,12 @@ pydantic==2.12.5
     #   anthropic
     #   banks
     #   cartesia
+    #   chromadb
     #   cohere
     #   dspy
     #   exa-py
     #   fastapi
+    #   fastapi-cloud-cli
     #   google-genai
     #   groq
     #   langchain
@@ -835,23 +968,27 @@ pydantic==2.12.5
     #   llama-index-core
     #   llama-index-instrumentation
     #   llama-index-workflows
+    #   mcp
     #   mem0ai
     #   mistralai
     #   openai
     #   pipecat-ai
     #   prefect
     #   pydantic-ai-slim
+    #   pydantic-evals
     #   pydantic-extra-types
     #   pydantic-graph
     #   pydantic-settings
     #   qdrant-client
+    #   sarvamai
     #   speechmatics-voice
     #   super
-pydantic-ai==0.0.33
+pydantic-ai==0.0.55
     # via super
-pydantic-ai-slim==0.0.33
+pydantic-ai-slim==0.0.55
     # via
     #   pydantic-ai
+    #   pydantic-evals
     #   super
 pydantic-core==2.41.5
     # via
@@ -859,15 +996,19 @@ pydantic-core==2.41.5
     #   cohere
     #   prefect
     #   pydantic
+    #   sarvamai
+pydantic-evals==0.0.55
+    # via pydantic-ai-slim
 pydantic-extra-types==2.11.0
     # via
     #   fastapi
     #   prefect
-pydantic-graph==0.0.33
+pydantic-graph==0.0.55
     # via pydantic-ai-slim
 pydantic-settings==2.13.1
     # via
     #   fastapi
+    #   mcp
     #   prefect
 pydub==0.25.1
     # via cartesia
@@ -879,10 +1020,15 @@ pyjwt==2.11.0
     # via
     #   livekit-agents
     #   livekit-api
+    #   mcp
 pyloudnorm==0.1.1
     # via pipecat-ai
-pypdf==6.7.2
+pypdf==6.7.3
     # via llama-index-readers-file
+pypika==0.51.1
+    # via chromadb
+pyproject-hooks==1.2.0
+    # via build
 pyreadline3==3.5.4 ; sys_platform == 'win32'
     # via humanfriendly
 pytest==9.0.2
@@ -896,6 +1042,7 @@ python-dateutil==2.9.0.post0
     #   aiobotocore
     #   botocore
     #   dateparser
+    #   kubernetes
     #   mistralai
     #   pandas
     #   pendulum
@@ -912,7 +1059,9 @@ python-dotenv==1.2.1
     #   super
     #   uvicorn
 python-multipart==0.0.22
-    # via fastapi
+    # via
+    #   fastapi
+    #   mcp
 python-slugify==8.0.4
     # via prefect
 python-socks==2.8.1
@@ -926,17 +1075,21 @@ pytz==2025.2
 pywin32==311 ; sys_platform == 'win32'
     # via
     #   docker
+    #   mcp
     #   portalocker
 pyyaml==6.0.3
     # via
     #   apprise
+    #   chromadb
     #   fastapi
     #   huggingface-hub
+    #   kubernetes
     #   langchain-core
     #   llama-index-core
     #   mistralai
     #   optuna
     #   prefect
+    #   pydantic-evals
     #   super
     #   transformers
     #   uvicorn
@@ -967,6 +1120,7 @@ requests==2.32.5
     #   google-auth
     #   google-genai
     #   huggingface-hub
+    #   kubernetes
     #   langsmith
     #   llama-index-core
     #   markitdown
@@ -979,17 +1133,30 @@ requests==2.32.5
     #   tiktoken
     #   transformers
 requests-oauthlib==2.0.0
-    # via apprise
+    # via
+    #   apprise
+    #   kubernetes
 requests-toolbelt==1.0.0
     # via langsmith
 resampy==0.4.3
     # via pipecat-ai
 rfc3339-validator==0.1.4
     # via prefect
-rich==11.2.0
+rich==14.3.3
     # via
+    #   chromadb
+    #   modal
     #   prefect
+    #   pydantic-ai-slim
+    #   pydantic-evals
+    #   rich-toolkit
     #   typer
+rich-toolkit==0.19.7
+    # via
+    #   fastapi-cli
+    #   fastapi-cloud-cli
+rignore==0.7.6
+    # via fastapi-cloud-cli
 rpds-py==0.30.0
     # via
     #   jsonschema
@@ -998,26 +1165,39 @@ rsa==4.9.1
     # via google-auth
 ruamel-yaml==0.19.1
     # via prefect
-ruff==0.15.2
+ruff==0.15.3
 s3transfer==0.14.0
     # via boto3
 safetensors==0.7.0
     # via transformers
+sarvamai==0.1.21
+    # via pipecat-ai
+scikit-learn==1.8.0
+    # via sentence-transformers
 scipy==1.17.1
-    # via pyloudnorm
+    # via
+    #   pyloudnorm
+    #   scikit-learn
+    #   sentence-transformers
 semver==3.0.4
     # via prefect
+sentence-transformers==5.2.3
+sentry-sdk==2.53.0
+    # via fastapi-cloud-cli
 setuptools==82.0.0
-    # via llama-index-core
+    # via
+    #   llama-index-core
+    #   torch
 shellingham==1.5.4
     # via typer
 six==1.17.0
     # via
+    #   kubernetes
     #   markdownify
     #   posthog
     #   python-dateutil
     #   rfc3339-validator
-smithy-aws-core==0.3.0
+smithy-aws-core==0.4.0
     # via aws-sdk-transcribe-streaming
 smithy-aws-event-stream==0.2.1
     # via smithy-aws-core
@@ -1053,24 +1233,36 @@ soxr==0.5.0.post1
 speechmatics-rt==0.5.3
     # via speechmatics-voice
 speechmatics-voice==0.2.8
-    # via livekit-plugins-speechmatics
-sqlalchemy==2.0.46
+    # via
+    #   livekit-plugins-speechmatics
+    #   pipecat-ai
+sqlalchemy==2.0.47
     # via
     #   alembic
     #   llama-index-core
     #   mem0ai
     #   optuna
     #   prefect
-starlette==0.46.2
-    # via fastapi
+sse-starlette==3.2.0
+    # via mcp
+starlette==0.50.0
+    # via
+    #   fastapi
+    #   mcp
+    #   sse-starlette
 striprtf==0.0.26
     # via llama-index-readers-file
 sympy==1.14.0
-    # via onnxruntime
-tavily-python==0.7.21
+    # via
+    #   onnxruntime
+    #   torch
+synchronicity==0.11.1
+    # via modal
+tavily-python==0.7.22
     # via super
 tenacity==9.1.4
     # via
+    #   chromadb
     #   dspy
     #   google-genai
     #   langchain-core
@@ -1078,6 +1270,8 @@ tenacity==9.1.4
     #   llama-index-core
 text-unidecode==1.3
     # via python-slugify
+threadpoolctl==3.6.0
+    # via scikit-learn
 tiktoken==0.12.0
     # via
     #   langchain-openai
@@ -1089,39 +1283,56 @@ tinytag==2.2.0
     # via llama-index-core
 tokenizers==0.22.2
     # via
+    #   chromadb
     #   cohere
     #   litellm
     #   transformers
 toml==0.10.2
-    # via prefect
+    # via
+    #   modal
+    #   prefect
+torch==2.10.0
+    # via sentence-transformers
 tqdm==4.67.3
     # via
+    #   chromadb
     #   dspy
     #   huggingface-hub
     #   llama-index-core
     #   nltk
     #   openai
     #   optuna
+    #   sentence-transformers
     #   transformers
 transformers==4.57.1
     # via
     #   livekit-plugins-turn-detector
     #   pipecat-ai
+    #   sentence-transformers
     #   speechmatics-voice
     #   super
+triton==3.6.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'
+    # via torch
 typer==0.19.2
     # via
+    #   chromadb
     #   fastapi-cli
+    #   fastapi-cloud-cli
     #   livekit-agents
+    #   modal
     #   prefect
+types-certifi==2021.10.8.3
+    # via modal
 types-protobuf==6.32.1.20260221
     # via
     #   livekit
     #   livekit-agents
     #   livekit-api
     #   livekit-protocol
-types-requests==2.32.4.20260107
+types-requests==2.32.4.20260107 ; sys_platform != 'emscripten'
     # via cohere
+types-toml==0.10.8.20240310
+    # via modal
 typing-extensions==4.15.0
     # via
     #   aioredis
@@ -1132,6 +1343,7 @@ typing-extensions==4.15.0
     #   azure-core
     #   beautifulsoup4
     #   cartesia
+    #   chromadb
     #   cohere
     #   deepgram-sdk
     #   exa-py
@@ -1145,20 +1357,27 @@ typing-extensions==4.15.0
     #   livekit-agents
     #   llama-index-core
     #   llama-index-workflows
+    #   mcp
+    #   modal
     #   openai
     #   opentelemetry-api
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-    #   posthog
     #   prefect
     #   pydantic
     #   pydantic-core
     #   pydantic-extra-types
     #   pytest-asyncio
     #   referencing
+    #   rich-toolkit
+    #   sarvamai
+    #   sentence-transformers
     #   sqlalchemy
+    #   starlette
+    #   synchronicity
+    #   torch
     #   typer
     #   typing-inspect
     #   typing-inspection
@@ -1168,6 +1387,7 @@ typing-inspect==0.9.0
     #   llama-index-core
 typing-inspection==0.4.2
     # via
+    #   mcp
     #   mistralai
     #   pydantic
     #   pydantic-ai-slim
@@ -1190,19 +1410,24 @@ urllib3==2.6.3
     # via
     #   botocore
     #   docker
+    #   kubernetes
     #   qdrant-client
     #   requests
+    #   sentry-sdk
     #   types-requests
 uuid-utils==0.14.1
     # via
     #   langchain-core
     #   langsmith
-uv==0.10.4
+uv==0.10.6
     # via prefect
 uvicorn==0.41.0
     # via
+    #   chromadb
     #   fastapi
     #   fastapi-cli
+    #   fastapi-cloud-cli
+    #   mcp
     #   pipecat-ai
     #   prefect
 uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'
@@ -1210,7 +1435,12 @@ uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'c
 watchfiles==1.1.1
     # via
     #   livekit-agents
+    #   modal
     #   uvicorn
+wcwidth==0.6.0
+    # via prompt-toolkit
+websocket-client==1.9.0
+    # via kubernetes
 websockets==14.2
     # via
     #   cartesia
@@ -1220,6 +1450,7 @@ websockets==14.2
     #   pipecat-ai
     #   pipecat-ai-whisker
     #   prefect
+    #   sarvamai
     #   speechmatics-rt
     #   uvicorn
 whenever==0.9.5 ; python_full_version >= '3.13'

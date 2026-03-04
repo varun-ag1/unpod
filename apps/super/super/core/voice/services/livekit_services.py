@@ -2437,7 +2437,7 @@ class LiveKitServiceFactory:
             # IMPORTANT: preemptive_generation=False to prevent duplicate LLM requests/TTS
             # See: https://github.com/livekit/agents/issues/4219
             # When True, causes duplicate audio output and doubled token costs
-            "preemptive_generation": self.speaking_plan.get("preemptive_generation", True),
+            "preemptive_generation": self.speaking_plan.get("preemptive_generation", False),
             # Resume after false interruptions for better conversation flow
             "resume_false_interruption": self.speaking_plan.get("resume_false_interruption", True),
             "false_interruption_timeout": self.speaking_plan.get("false_interruption_timeout", 1),
