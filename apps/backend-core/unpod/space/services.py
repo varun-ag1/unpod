@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 
@@ -1078,49 +1079,80 @@ def get_calls(space_id: int, query_params: dict):
     collection_name = "tasks"
     skip, limit = getPagination(query_params, 30)
     query = {
-        "space_id": str(space_id),
-        "output": {"$ne": {}, "$exists": True},
+        "space_id": str(space_id)
     }
-    exclude_fields = [
-        "retry_attempt",
-        "thread_id",
-        "user_info",
-        "call_analytics",
-        "execution_analytics",
-        "last_status_change",
-        "provider",
-        "attachments",
-        "ref_id",
-        "failure_count",
-        "last_failure_reason",
-        "scheduled_timestamp",
-        "task",
-        "collection_ref",
-        "run_id",
-        "user_org_id",
-        "user",
-        "space_id",
-        "modified",
-        "assignee",
-        "execution_type",
-        "input.token",
-        "input.quality",
-        "output.call_id",
-        "output.contact_number",
-        "output.transcript",
-        "output.post_call_data",
-        "output.metadata",
-        "output.call_end_reason",
-        "output.recording_url",
-        "output.start_time",
-        "output.end_time",
-        "output.assistant_number",
-        "output.call_summary",
-        "output.duration",
-        "output.cost",
-        "output.call_status",
-    ]
-    projection = {field: 0 for field in exclude_fields}
+    search_str = query_params.get("search")
+    call_type = query_params.get("call_type")
+    date_from = query_params.get("from_ts")
+    date_to = query_params.get("to_ts")
+    status = query_params.get("status")
+
+    filters = []
+    if date_from or date_to:
+      date_filter = {}
+      try:
+        if date_from:
+          date_filter["$gte"] = datetime.fromtimestamp(int(date_from))
+        if date_to:
+          date_filter["$lte"] = datetime.fromtimestamp(int(date_to))
+        filters.append({"created": date_filter})
+      except Exception:
+        pass
+
+    if call_type:
+      if call_type == "inbound":
+        call_type_values = ["inbound", "inboundPhoneCall"]
+      elif call_type == "outbound":
+        call_type_values = ["outbound", "outboundPhoneCall"]
+      else:
+        call_type_values = [call_type]
+      filters.append(
+        {
+          "$or": [
+            {"output.call_type": {"$in": call_type_values}},
+            {"output.type": {"$in": call_type_values}},
+          ]
+        }
+      )
+
+    if search_str:
+      filters.append(
+        {
+          "$or": [
+            {"input.name": {"$regex": search_str, "$options": "i"}},
+            {"input.phone": {"$regex": search_str, "$options": "i"}},
+            {"output.customer": {"$regex": search_str, "$options": "i"}},
+            {
+              "output.contact_number": {
+                "$regex": search_str,
+                "$options": "i",
+              }
+            },
+          ]
+        }
+      )
+
+    if status:
+      status_values = [s.strip().replace("+", " ") for s in status.split(",")]
+
+      filters.append(
+        {"output.post_call_data.summary.status": {"$in": status_values}}
+      )
+
+    if filters:
+      query = {**query, **{"$and": filters}}
+
+    projection = {
+      "_id": 1,
+      "task_id": 1,
+      "created": 1,
+      "status": 1,
+      "input.call_type": 1,
+      "input.name": 1,
+      "input.contact_number": 1,
+      "output.call_type": 1,
+      "output.customer": 1,
+    }
 
     try:
         collection = MongoDBQueryManager.get_collection(collection_name)

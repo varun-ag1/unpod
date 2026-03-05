@@ -608,7 +608,13 @@ class SpaceViewSet(QueryOptimizationMixin, viewsets.GenericViewSet):
                 evals_map = KnowledgeBaseEvals.objects.filter(
                     eval_type="knowledgebase", linked_handle__in=space_tokens
                 ).values("eval_name", "linked_handle", "gen_status", "eval_data")
+                eval_space_tokens = []
+                for item in evals_map:
+                    if item.get("eval_data", {}).get("space_token"):
+                        eval_space_tokens.append(item.get("eval_data", {}).get("space_token"))
                 evals_map = {item["linked_handle"]: item for item in evals_map}
+                space_infos = Space.objects.filter(token__in=eval_space_tokens).values('token', "slug")
+                space_info_map = {item["token"]: item for item in space_infos}
 
             private_thread_space = {}
             public_threads_space = {}
@@ -650,9 +656,11 @@ class SpaceViewSet(QueryOptimizationMixin, viewsets.GenericViewSet):
                 if space_type == "knowledge_base":
                     space["has_evals"] = space.get("token") in evals_map
                     if space["has_evals"]:
-                      evals_info = evals_map.get(space.get("token"))
+                      evals_info = evals_map.get(space.get("token"), {})
                       eval_data = evals_info.pop("eval_data", {})
                       evals_info["eval_token"] = eval_data.get("space_token")
+                      sp_evals_info = space_info_map.get(evals_info["eval_token"], {})
+                      evals_info["eval_slug"] = sp_evals_info.get("slug")
                       space["evals_info"] = evals_info
             # if len(space_list):
             #     space_list.insert(0, getAllSpaceObject())

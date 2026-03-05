@@ -14,6 +14,7 @@ class AdminLogin(View):
         form = LoginForm()
         config_file = os.environ.get('DJANGO_SETTINGS_MODULE')
         button_value = 'Log in' if 'local' in config_file.lower() else 'Send OTP'
+
         return render(request, settings.ADMIN_LOGIN_TEMPLATE, {"form": form, "button_value": button_value})
 
     def post(self, request):
@@ -41,6 +42,7 @@ class AdminLogin(View):
             if _form.is_valid():
                 config_file = os.environ.get('DJANGO_SETTINGS_MODULE')
                 button_value = 'Log in' if 'local' in config_file.lower() else 'Send OTP'
+
                 user = authenticate(username=_form.data["username"],
                                     password=_form.data["password"])
                 if user is not None:

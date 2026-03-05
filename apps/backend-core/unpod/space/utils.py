@@ -178,6 +178,8 @@ def checkPostSpaceAccess(
 def getAllSpaceQuery(request, space_type, case=None):
     query = Q(space_type=space_type)
     if request.user.is_authenticated:
+        space_query = Q()  # Initialize an empty Q object
+
         if case:
             if case in ["all", "home"]:
                 space_query = Q(
