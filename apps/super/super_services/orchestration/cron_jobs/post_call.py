@@ -226,6 +226,15 @@ def generate_post_flow_name():
     return f"post-call-flow-{task_id}"
 
 
+@task(name="update-task-status")
+async def update_task_status(task_id,call_result):
+    try:
+        update_data = {"status": TaskStatusEnum.completed, "output": {"call_status": call_result.call_status,"data":"call completed evaluated data will be available soon"}}
+        TaskModel.update_one({"task_id": task_id}, update_data)
+    except Exception as e:
+        pass
+
+
 @flow(
     name="Post Call Flow",
     description="Post Call Flow",
@@ -235,6 +244,7 @@ def generate_post_flow_name():
 async def post_call_flow(job: FlowJob):
     if not job.task_id:
         raise ValueError("Task not found, No task_id provided")
+    await update_task_status(task_id=job.task_id, call_result=job.call_result)
     current_task = TaskModel.get(task_id=job.task_id)
     post_call_result = await post_call_workflow(
         current_task, job.call_result, job.user_state
@@ -267,7 +277,7 @@ async def post_call_flow(job: FlowJob):
 if __name__ == "__main__":
     from super_services.voice.models.config import ModelConfig
     job=FlowJob(
-        task_id="T0c81bc0d072311f1878d43cd8a99e069",
+        task_id="Tefe4015f78de11f082ac156368e7acc4",
         call_result=CallResult(
             status="notConnected",
             data={}

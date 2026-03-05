@@ -35,6 +35,7 @@ from super.core.handler.config import (
 from super.core.logging import logging as app_logging
 from super.core.plugin.base import PluginLocation, PluginStorageFormat
 from super.core.voice.base import BaseVoiceHandler
+from super.core.voice.shared_mixin import SharedVoiceMixin
 from super.core.voice.plugins import PluginRegistry
 from super.core.voice.managers.prompt_manager import PromptManager
 from super.core.voice.schema import AgentConfig, CallSession, UserState, Modality
@@ -103,7 +104,7 @@ TOPIC_LK_CHAT = "lk.chat"  # Main chat topic for responses
 TOPIC_LK_STREAM = "lk.stream"  # Streaming chunks topic
 
 
-class LiveKitLiteHandler(BaseVoiceHandler, ABC):
+class LiveKitLiteHandler(SharedVoiceMixin, BaseVoiceHandler, ABC):
     """
     Lightweight LiveKit voice handler with plugin architecture.
 
@@ -160,26 +161,7 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
             model_config or (user_state.model_config if user_state else None) or {}
         )
 
-        # Seed eval ground truth for post-call judgement when present in config/context.
-        if self.user_state:
-            if not isinstance(self.user_state.extra_data, dict):
-                self.user_state.extra_data = {}
-            if "eval_ground_truth" not in self.user_state.extra_data:
-                qa_pairs = []
-                if isinstance(self.config, dict):
-                    qa_pairs = (
-                        self.config.get("qa_pairs")
-                        or self.config.get("evaluation_qa_pairs")
-                        or []
-                    )
-                if not qa_pairs and isinstance(
-                    self.user_state.extra_data.get("data"), dict
-                ):
-                    qa_pairs = self.user_state.extra_data.get("data", {}).get(
-                        "qa_pairs", []
-                    )
-                if isinstance(qa_pairs, list) and qa_pairs:
-                    self.user_state.extra_data["eval_ground_truth"] = qa_pairs
+        # Seed eval ground truth (now handled by SharedVoiceMixin._init_shared_mixin)
 
         # Log config for STT/TTS debugging
         self._logger.info(
@@ -227,13 +209,10 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
 
         # State flags
         self._is_shutting_down = False
-        self._runtime_resources_cleaned = False
         self._disconnect_event: Optional[asyncio.Event] = None
         self._services_initialized = False
         self._first_response_sent = asyncio.Event()
         self._kb_ready = asyncio.Event()
-        self._kb_warmup_task: Optional[asyncio.Task] = None
-        self._kb_auto_injected: bool = False
 
         # Realtime mode detection
         # In full realtime mode, TTS is not available - realtime LLM handles audio natively
@@ -259,22 +238,9 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
         # Multi-participant STT tracking
         self._participant_stt_tasks: Dict[str, asyncio.Task] = {}
         self._participant_stt_streams: Dict[str, Any] = {}
-        self._pending_eval_llm_latencies: List[float] = []
 
-        # Idle timeout configuration (seconds)
-        self._idle_timeout_seconds: float = float(
-            self.config.get("idle_timeout_seconds", 30.0)
-            if isinstance(self.config, dict)
-            else 30.0
-        )
-        self._idle_warning_1_seconds: float = self._idle_timeout_seconds * 0.5  # 15s
-        self._idle_warning_2_seconds: float = self._idle_timeout_seconds * 0.83  # 25s
-        self._last_activity_time: float = time.time()
-        self._idle_warning_count: int = 0
-        self._idle_monitor_task: Optional[asyncio.Task] = None
-        self._idle_monitor_running: bool = False
-        self._sending_idle_warning: bool = False
-        self._agent_state: str = "listening"
+        # Initialize shared mixin (idle timeout, eval, cleanup, KB, etc.)
+        self._init_shared_mixin()
 
         self._logger.info(f"LiveKitLiteHandler created (session={self._session_id})")
 
@@ -303,18 +269,7 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
             )
         return self._service_factory
 
-    @property
-    def use_conversation_intelligence(self) -> bool:
-        """
-        Check if dynamic conversation intelligence is enabled.
-
-        Uses the 4-phase model: greeting -> presenting -> reflecting -> closing
-        Enabled via config: use_conversation_intelligence: true
-        Requires CONVERSATION_INTELLIGENCE_AVAILABLE to be True.
-        """
-        if not CONVERSATION_INTELLIGENCE_AVAILABLE:
-            return False
-        return self.config.get("use_conversation_intelligence", True)
+    # use_conversation_intelligence property inherited from SharedVoiceMixin
 
     def _add_users(self) -> None:
         """Create agent and user references."""
@@ -409,11 +364,7 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
             self._logger.error(f"Preload failed: {e}")
             return False
 
-    def _kb_enabled(self) -> bool:
-        """Check if knowledge base is configured."""
-        if not self.config:
-            return False
-        return bool(self.config.get("knowledge_base"))
+    # _kb_enabled inherited from SharedVoiceMixin
 
     async def _auto_inject_kb_context(self) -> None:
         """Proactively inject KB context when LLM hasn't called get_docs.
@@ -478,65 +429,8 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
             self._logger.warning(f"[KB_AUTO_INJECT] Failed: {e}")
 
     async def _background_kb_warmup(self, immediate: bool = True) -> None:
-        """
-        Warm up KB in background.
-
-        With preloaded embeddings from ServiceCache, KB init is now fast (~50-100ms)
-        so we can start immediately instead of waiting for first response.
-
-        Args:
-            immediate: If True, start KB warmup immediately without waiting
-                      for first response. Default: False for backward compat.
-        """
-        try:
-            if not self._kb_enabled():
-                self._kb_ready.set()
-                return
-
-            if not immediate:
-                # Legacy behavior: wait for first response
-                await asyncio.wait_for(
-                    self._first_response_sent.wait(),
-                    timeout=30.0,
-                )
-                await asyncio.sleep(0.5)
-
-            _start = asyncio.get_event_loop().time()
-
-            from super.core.voice.managers.knowledge_base import (
-                KnowledgeBaseManager,
-            )
-
-            kb_manager = KnowledgeBaseManager(
-                logger=self._logger.getChild("kb"),
-                session_id=self._session_id,
-                user_state=self.user_state,
-                config=self.config,
-            )
-
-            # Phase 1: initialize local retrieval path and mark ready ASAP.
-            await kb_manager._init_context_retrieval()
-            self._kb_manager = kb_manager
-            self._kb_ready.set()
-            self._logger.info(
-                "[KB_WARMUP] Local KB retrieval initialized; signaling ready for get_docs"
-            )
-
-            # Phase 2: continue expensive remote preload in background.
-            await kb_manager._preload_knowledge_base_documents(self.user_state)
-
-            elapsed_ms = (asyncio.get_event_loop().time() - _start) * 1000
-            self._logger.info(
-                f"Background KB warmup complete in {elapsed_ms:.0f}ms "
-                f"(immediate={immediate})"
-            )
-
-        except asyncio.TimeoutError:
-            self._logger.warning("KB warmup timeout - first response not sent")
-            self._kb_ready.set()
-        except Exception as e:
-            self._logger.warning(f"KB warmup failed: {e}")
-            self._kb_ready.set()
+        """Delegates to shared mixin KB warmup."""
+        await self._shared_background_kb_warmup(immediate=immediate)
 
     async def create_agent_session(
         self,
@@ -585,263 +479,14 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
             userdata=userdata, user_state=self.user_state
         )
 
-    async def _persist_session_quality_metrics(
-        self, reason: str = "session_end"
-    ) -> None:
-        """
-        Persist quality metrics and call summary from DynamicConversationState when session ends.
-
-        This ensures metrics are captured regardless of how the session ends
-        (user hangup, room disconnect, error, etc.), not just when the
-        end_call tool is explicitly invoked.
-
-        Args:
-            reason: Why the session is ending (e.g., "session_disconnect", "error")
-        """
-        try:
-            # Only applies to stage-based conversation mode
-            if not self.use_conversation_intelligence:
-                return
-
-            # Get agent's conversation state
-            agent = getattr(self, "_agent", None)
-            if not agent:
-                self._logger.debug("No agent available for quality metrics persistence")
-                return
-
-            conv_state = getattr(agent, "_conv_state", None)
-            if not conv_state:
-                self._logger.debug("No DynamicConversationState found in agent")
-                return
-
-            # Update conv_state with actual metadata values (may have been empty at init time)
-            # These values are now definitely available at call-end time
-            if self.user_state:
-                conv_state.task_id = getattr(self.user_state, "task_id", "") or ""
-            conv_state.session_id = self._session_id or ""
-            conv_state.agent_handle = self.config.get("agent_name", "") or ""
-            self._logger.info(
-                f"[SESSION_END] Metadata updated: task_id={conv_state.task_id}, "
-                f"session_id={conv_state.session_id}, agent={conv_state.agent_handle}"
-            )
-
-            # Log quality summary
-            self._logger.info(conv_state.get_quality_log_line())
-
-            # Get metrics for detailed logging
-            metrics = conv_state.get_quality_metrics()
-            progress = metrics.get("content_progress", {})
-            self._logger.info(
-                f"[SESSION_END] reason={reason} | "
-                f"phase={metrics.get('current_phase', 'unknown')} | "
-                f"content={progress.get('delivered', 0)}/{progress.get('total', 0)} | "
-                f"objective={'achieved' if metrics.get('objective_achieved') else metrics.get('objective_outcome', 'pending')} | "
-                f"score={metrics['scores']['overall']}"
-            )
-
-            # Build and log call summary dashboard
-            call_summary_text = conv_state.build_call_summary(end_reason=reason)
-            self._logger.info(f"\n{call_summary_text}")
-
-            # Get call summary as dictionary for database storage
-            call_summary_dict = conv_state.get_call_summary_dict(end_reason=reason)
-
-            # Add quality metrics and call summary to user_state.extra_data for post-call analytics
-            if self.user_state:
-                if not isinstance(self.user_state.extra_data, dict):
-                    self.user_state.extra_data = {}
-                self.user_state.extra_data["quality_metrics"] = metrics
-                self.user_state.extra_data["conversation_state"] = conv_state.to_dict()
-                self.user_state.extra_data["call_summary"] = call_summary_dict
-                self._logger.debug(
-                    "Quality metrics and call summary added to user_state.extra_data"
-                )
-
-            # Save call summary to database using TaskModel
-            task_id = self.user_state.task_id if self.user_state else None
-            if task_id:
-                # 1. Save to TaskExecutionLog for audit trail
-                await save_execution_log(
-                    task_id=task_id,
-                    step="call_summary",
-                    status="completed",
-                    output=call_summary_dict,
-                )
-                self._logger.info(
-                    f"[CALL_SUMMARY] Saved to execution log | task_id={task_id}"
-                )
-
-                # 2. Update TaskModel.output with call summary for quick access
-                try:
-                    TaskModel._get_collection().update_one(
-                        {"task_id": task_id},
-                        {"$set": {"output.call_summary": call_summary_dict}},
-                    )
-                    self._logger.info(
-                        f"[CALL_SUMMARY] Updated task output | task_id={task_id}"
-                    )
-                except Exception as db_error:
-                    self._logger.error(
-                        f"[CALL_SUMMARY] Failed to update task: {db_error}"
-                    )
-            else:
-                self._logger.warning(
-                    "[CALL_SUMMARY] No task_id available, skipping DB storage"
-                )
-
-            # Persist to JSONL file
-            filepath = conv_state.persist_quality_metrics(reason=reason)
-            if filepath:
-                self._logger.info(f"Quality metrics persisted to: {filepath}")
-            else:
-                self._logger.warning("Failed to persist quality metrics")
-
-        except Exception as e:
-            self._logger.error(f"Error persisting session quality metrics: {e}")
-
-    async def _record_agent_response_for_quality(self, content: str) -> None:
-        """
-        Record agent response for quality metrics anti-pattern detection.
-
-        This captures agent responses for detecting:
-        - Question-only turns (ending with just a question)
-        - Clarification requests (excessive clarification)
-        - Content repetition (saying the same thing twice)
-
-        Args:
-            content: The agent's response text
-        """
-        try:
-            agent = getattr(self, "_agent", None)
-            if not agent:
-                return
-
-            conv_state = getattr(agent, "_conv_state", None)
-            if not conv_state:
-                return
-
-            # Record the response and get anti-pattern detection result
-            result = conv_state.record_agent_response(
-                response_text=content,
-                phase="conversation",  # Simplified - no phase tracking
-                turn=conv_state.turn_count,
-            )
-
-            # Log any detected issues
-            issues = result.get("issues", [])
-            if issues:
-                self._logger.warning(
-                    f"[QUALITY_ANTIPATTERN] turn={conv_state.turn_count} "
-                    f"repair={conv_state.in_repair} issues={issues}"
-                )
-
-        except Exception as e:
-            self._logger.debug(f"Error recording agent response for quality: {e}")
-
-    def _ensure_eval_records(self) -> Dict[str, Any]:
-        """Ensure user_state.extra_data.eval_records exists for post-call eval."""
-        if not self.user_state:
-            return {}
-
-        if not isinstance(self.user_state.extra_data, dict):
-            self.user_state.extra_data = {}
-
-        eval_records = self.user_state.extra_data.get("eval_records")
-        if not isinstance(eval_records, dict):
-            eval_records = {}
-            self.user_state.extra_data["eval_records"] = eval_records
-
-        if not isinstance(eval_records.get("tool_calls"), list):
-            eval_records["tool_calls"] = []
-        if not isinstance(eval_records.get("agent_responses"), list):
-            eval_records["agent_responses"] = []
-        if not isinstance(eval_records.get("user_messages"), list):
-            eval_records["user_messages"] = []
-        if not isinstance(eval_records.get("sequence_counter"), int):
-            eval_records["sequence_counter"] = 0
-        if not isinstance(eval_records.get("llm_latency_samples"), list):
-            eval_records["llm_latency_samples"] = []
-
-        return eval_records
-
-    def _next_eval_sequence(self) -> int:
-        eval_records = self._ensure_eval_records()
-        if not eval_records:
-            return 0
-        eval_records["sequence_counter"] += 1
-        return eval_records["sequence_counter"]
-
-    def _record_eval_user_message(self, content: str) -> None:
-        """Capture user message for call-end QA alignment."""
-        try:
-            eval_records = self._ensure_eval_records()
-            if not eval_records:
-                return
-            eval_records["user_messages"].append(
-                {
-                    "sequence_id": self._next_eval_sequence(),
-                    "content": content,
-                    "timestamp": datetime.utcnow().isoformat(),
-                }
-            )
-        except Exception as e:
-            self._logger.debug(f"Failed to record user eval message: {e}")
-
-    def _record_eval_llm_latency(
-        self,
-        llm_latency: Optional[float],
-        source: str = "llm_metrics",
-    ) -> None:
-        """Store per-turn LLM latency for post-call analysis."""
-        try:
-            if llm_latency is None:
-                return
-            llm_latency = float(llm_latency)
-            if llm_latency <= 0:
-                return
-
-            eval_records = self._ensure_eval_records()
-            if not eval_records:
-                return
-
-            self._pending_eval_llm_latencies.append(llm_latency)
-            eval_records["llm_latency_samples"].append(
-                {
-                    "sequence_id": self._next_eval_sequence(),
-                    "llm_latency": llm_latency,
-                    "source": source,
-                    "timestamp": datetime.utcnow().isoformat(),
-                }
-            )
-        except Exception as e:
-            self._logger.debug(f"Failed to record eval llm latency: {e}")
-
-    def _consume_eval_llm_latency(self) -> Optional[float]:
-        """Consume the next queued LLM latency value for response-level alignment."""
-        if not self._pending_eval_llm_latencies:
-            return None
-        return self._pending_eval_llm_latencies.pop(0)
-
-    def _record_eval_agent_response(
-        self,
-        content: str,
-        llm_latency: Optional[float] = None,
-    ) -> None:
-        """Capture assistant response for call-end QA evaluation."""
-        try:
-            eval_records = self._ensure_eval_records()
-            if not eval_records:
-                return
-            payload = {
-                "sequence_id": self._next_eval_sequence(),
-                "content": content,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-            if llm_latency is not None:
-                payload["llm_latency"] = float(llm_latency)
-            eval_records["agent_responses"].append(payload)
-        except Exception as e:
-            self._logger.debug(f"Failed to record assistant eval response: {e}")
+    # _persist_session_quality_metrics inherited from SharedVoiceMixin
+    # _record_agent_response_for_quality inherited from SharedVoiceMixin
+    # _ensure_eval_records inherited from SharedVoiceMixin
+    # _next_eval_sequence inherited from SharedVoiceMixin
+    # _record_eval_user_message inherited from SharedVoiceMixin
+    # _record_eval_llm_latency inherited from SharedVoiceMixin
+    # _consume_eval_llm_latency inherited from SharedVoiceMixin
+    # _record_eval_agent_response inherited from SharedVoiceMixin
 
     def create_agent(self, ctx) -> "Agent":
         """Create the LiveKit agent (state built internally by agent)."""
@@ -1411,21 +1056,27 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
                 # print(f"  Overall Avg Total: {avg_total:.2f}s")
                 print(f"{'=' * 60}\n")
 
-                # # Auto-inject KB context if LLM skipped get_docs
-                # _KB_AUTO_INJECT_TURN = 2
-                # if (
-                #     turn_count == _KB_AUTO_INJECT_TURN
-                #     and self._kb_enabled()
-                #     and not self._kb_auto_injected
-                #     and self._kb_ready.is_set()
-                #     and self._agent
-                #     and getattr(self._agent, "_kb_tool_calls", 0) == 0
-                # ):
-                #     self._logger.warning(
-                #         f"[KB_AUTO_INJECT] get_docs not called after "
-                #         f"{turn_count} turns, auto-injecting KB context"
-                #     )
-                #     asyncio.create_task(self._auto_inject_kb_context())
+                # Auto-inject KB context if LLM skipped get_docs after N turns.
+                kb_auto_inject_enabled = self.config.get(
+                    "enable_kb_auto_inject", True
+                )
+                kb_auto_inject_turn = int(
+                    self.config.get("kb_auto_inject_turn", 2)
+                )
+                if (
+                    kb_auto_inject_enabled
+                    and turn_count >= kb_auto_inject_turn
+                    and self._kb_enabled()
+                    and not self._kb_auto_injected
+                    and self._kb_ready.is_set()
+                    and self._agent
+                    and getattr(self._agent, "_kb_tool_calls", 0) == 0
+                ):
+                    self._logger.warning(
+                        f"[KB_AUTO_INJECT] get_docs not called after "
+                        f"{turn_count} turns, auto-injecting KB context"
+                    )
+                    asyncio.create_task(self._auto_inject_kb_context())
 
                 eou_met = None
                 llm_met = None
@@ -1484,141 +1135,9 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
 
         self.user_state.extra_data["latency_metrics"] = latency_data
 
-    def _parse_block_message(
-        self, raw_message: str
-    ) -> tuple[str, dict | None, list[dict] | None]:
-        """
-        Parse incoming message, extracting content and files from block JSON.
-
-        Args:
-            raw_message: Raw message text (may be JSON block or plain text)
-
-        Returns:
-            Tuple of (extracted_content, block_data or None, files list or None)
-        """
-        if not raw_message or not raw_message.strip():
-            return "", None, None
-
-        # Try to parse as JSON block
-        if raw_message.strip().startswith("{"):
-            try:
-                block_data = json.loads(raw_message)
-
-                # Check if this is a block event
-                if isinstance(block_data, dict) and block_data.get("event") == "block":
-                    raw_data = block_data.get("data")
-                    if raw_data is None or not isinstance(raw_data, dict):
-                        return raw_message, None, None
-                    data = raw_data
-
-                    inner_data = data.get("data") or {}
-                    if not isinstance(inner_data, dict):
-                        inner_data = {}
-
-                    # Extract content from nested data structure
-                    content = inner_data.get("content") or data.get("content") or ""
-
-                    # Extract attached files from inner data
-                    files = inner_data.get("files", [])
-
-                    self._logger.info(
-                        f"[TEXT_MODE] Parsed block message: "
-                        f"block_type={data.get('block_type')}, "
-                        f"content_type={data.get('content_type')}, "
-                        f"content_length={len(content)}, "
-                        f"files_count={len(files)}"
-                    )
-
-                    return content, block_data, files if files else None
-
-            except json.JSONDecodeError:
-                # Not valid JSON, treat as plain text
-                pass
-
-        # Return as plain text
-        return raw_message, None, None
-
-    async def _download_file_from_s3(self, file_info: dict) -> str | None:
-        """
-        Download a file from S3 to a local temporary location.
-
-        Args:
-            file_info: File metadata dict with 'url' or 'media_url' keys
-
-        Returns:
-            Local file path if successful, None otherwise
-        """
-        try:
-            from super_services.libs.core.s3 import s3_path_split, download_file
-            import tempfile
-            import os
-
-            # Get S3 URL (prefer 'url' which is the S3 path, fallback to 'media_url')
-            file_url = file_info.get("url") or file_info.get("media_url")
-            if not file_url:
-                self._logger.warning("No URL found in file info")
-                return None
-
-            # Parse S3 URL to get bucket and key
-            bucket_name, file_key = s3_path_split(file_url)
-
-            # Extract filename from the key
-            file_name = file_key.split("/")[-1]
-            name, ext = os.path.splitext(file_name)
-
-            # Create temp directory if needed
-            temp_dir = tempfile.gettempdir()
-            output_path = os.path.join(temp_dir, f"voice_input_{name}{ext}")
-
-            # Download file from S3
-            local_path = download_file(bucket_name, file_key, output_path)
-
-            self._logger.info(
-                f"[FILE_PROCESSING] Downloaded file from S3: {file_name} -> {local_path}"
-            )
-            return local_path
-
-        except Exception as e:
-            self._logger.error(
-                f"[FILE_PROCESSING] Failed to download file from S3: {e}"
-            )
-            return None
-
-    async def _process_attached_files(self, files: list[dict]) -> list[dict]:
-        """
-        Process attached files - download from S3 and prepare for LLM context.
-
-        Args:
-            files: List of file metadata dicts
-
-        Returns:
-            List of processed file info dicts with local paths
-        """
-        processed_files = []
-
-        for file_info in files:
-            media_type = file_info.get("media_type", "unknown")
-            file_name = file_info.get("name", "unknown")
-
-            self._logger.info(
-                f"[FILE_PROCESSING] Processing file: {file_name} (type: {media_type})"
-            )
-
-            # Download file from S3
-            local_path = await self._download_file_from_s3(file_info)
-
-            if local_path:
-                processed_files.append(
-                    {
-                        "name": file_name,
-                        "media_type": media_type,
-                        "local_path": local_path,
-                        "original_url": file_info.get("url"),
-                        "media_url": file_info.get("media_url"),
-                    }
-                )
-
-        return processed_files
+    # _parse_block_message inherited from SharedVoiceMixin
+    # _download_file_from_s3 inherited from SharedVoiceMixin
+    # _process_attached_files inherited from SharedVoiceMixin
 
     def _create_text_input_handler(self) -> Any:
         """
@@ -1751,73 +1270,7 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
 
         return custom_text_input_handler
 
-    def _build_response_block(
-        self,
-        response_text: str,
-        block_data: dict | None = None,
-        message_id: str | None = None,
-        cards: dict | None = None,
-    ) -> dict:
-        """
-        Build response block dict matching BlockModelSchema structure.
-
-        The response block follows the BlockModelSchema pattern:
-        - block: BlockEnum (html, text, media, etc.)
-        - block_type: BlockTypeEnum (pilot_response, reply, etc.)
-        - data: Dict containing content and cards
-
-        Supports two modes:
-        - Text response (with optional cards): response_text is non-empty
-        - Card-only block: response_text is empty, cards provided
-
-        Args:
-            response_text: The LLM response text (can be empty for card-only blocks)
-            block_data: Original block data from input (for context)
-            message_id: Unique ID for correlating with streaming chunks
-            cards: Optional single card object (e.g., {"type": "provider", "items": [...]})
-
-        Returns:
-            Dict formatted as response block (for use with publish_data)
-        """
-        # Extract context from original block if available
-        pilot = "multi-ai"
-        execution_type = "contact"
-        focus = "my_space"
-
-        if block_data:
-            pilot = block_data.get("pilot", pilot)
-            data = block_data.get("data", {})
-            execution_type = data.get("execution_type", execution_type)
-            inner_data = data.get("data", {})
-            focus = inner_data.get("focus", focus)
-
-        # Build data dict following BlockModelSchema pattern
-        data_content: dict = {}
-
-        # Include content only if provided (allows card-only blocks)
-        if response_text:
-            data_content["content"] = response_text
-            data_content["focus"] = focus
-
-        # Include cards inside data dict
-        if cards:
-            data_content["cards"] = cards
-
-        # Set block_type based on content presence
-        block_type = "pilot_response" if response_text else "card_block"
-
-        response_block = {
-            "event": "block_response",
-            "id": message_id or str(uuid.uuid4())[:12],
-            "pilot": pilot,
-            "execution_type": execution_type,
-            "block": "html",  # BlockEnum.html
-            "block_type": block_type,
-            "data": data_content,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-        return response_block
+    # _build_response_block inherited from SharedVoiceMixin
 
     async def _send_streaming_text(
         self,
@@ -3137,26 +2590,14 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
 
         return usage_data
 
-    async def _cleanup_runtime_resources(self) -> None:
-        """Release runtime resources that can keep worker processes alive."""
-        if self._runtime_resources_cleaned:
-            return
-        self._runtime_resources_cleaned = True
+    # _cleanup_runtime_resources inherited from SharedVoiceMixin
+    # (calls _handler_specific_cleanup below for LiveKit-specific resources)
 
-        await self._stop_idle_monitor()
+    async def _handler_specific_cleanup(self) -> None:
+        """Release LiveKit-specific runtime resources."""
         await self._stop_background_audio()
 
-        kb_task = self._kb_warmup_task
-        self._kb_warmup_task = None
-        if kb_task and not kb_task.done():
-            kb_task.cancel()
-            try:
-                await kb_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                self._logger.debug(f"KB warmup task cleanup warning: {e}")
-
+        # Clean up participant STT tasks
         participant_tasks = list(self._participant_stt_tasks.items())
         self._participant_stt_tasks.clear()
         for _, task in participant_tasks:
@@ -3172,6 +2613,7 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
                     f"Participant STT task cleanup warning ({participant_identity}): {e}"
                 )
 
+        # Clean up participant STT streams
         streams = list(self._participant_stt_streams.items())
         self._participant_stt_streams.clear()
         for participant_identity, stream in streams:
@@ -3182,11 +2624,6 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
                 self._logger.debug(
                     f"Participant STT stream cleanup warning ({participant_identity}): {e}"
                 )
-
-        try:
-            await self.plugins.cleanup_all()
-        except Exception as e:
-            self._logger.warning(f"Plugin cleanup failed during shutdown: {e}")
 
     async def end_call(self, reason: str = "completed") -> str:
         """End the current call gracefully."""
@@ -3425,292 +2862,63 @@ class LiveKitLiteHandler(BaseVoiceHandler, ABC):
             return False
 
     # -------------------------------------------------------------------------
-    # Idle Timeout Monitoring
+    # Idle/Post-call/Goodbye - inherited from SharedVoiceMixin
+    # Only LiveKit-specific overrides below (room deletion, realtime mode)
     # -------------------------------------------------------------------------
 
-    def _reset_idle_timer(self) -> None:
-        """Reset the idle timer on user or agent activity."""
-        self._last_activity_time = time.time()
-        self._idle_warning_count = 0
-        self._logger.debug("[IDLE] Timer reset - activity detected")
-
-    async def _start_idle_monitor(self) -> None:
-        """Start the idle timeout monitoring task."""
-        if self._idle_monitor_running:
-            return
-
-        self._idle_monitor_running = True
-        self._last_activity_time = time.time()
-        self._idle_warning_count = 0
-
-        self._logger.info(
-            f"[IDLE] Starting idle monitor (timeout={self._idle_timeout_seconds}s)"
-        )
-
-        self._idle_monitor_task = asyncio.create_task(self._idle_monitor_loop())
-
-    async def _stop_idle_monitor(self) -> None:
-        """Stop the idle timeout monitoring task."""
-        self._idle_monitor_running = False
-        if self._idle_monitor_task:
-            self._idle_monitor_task.cancel()
-            try:
-                await self._idle_monitor_task
-            except asyncio.CancelledError:
-                pass
-            self._idle_monitor_task = None
-        self._logger.debug("[IDLE] Idle monitor stopped")
-
-    async def _idle_monitor_loop(self) -> None:
-        """Background task to monitor user idle time."""
-        try:
-            while self._idle_monitor_running and not self._is_shutting_down:
-                await asyncio.sleep(0.5)  # Check every 500ms
-
-                # Skip idle checks while agent is speaking or thinking
-                if self._agent_state in ("speaking", "thinking"):
-                    continue
-
-                idle_duration = time.time() - self._last_activity_time
-
-                # First warning at 50% of timeout (15s for 30s timeout)
-                if (
-                    idle_duration >= self._idle_warning_1_seconds
-                    and self._idle_warning_count == 0
-                ):
-                    self._idle_warning_count = 1
-                    await self._send_idle_warning(1)
-
-                # Second warning at 83% of timeout (25s for 30s timeout)
-                elif (
-                    idle_duration >= self._idle_warning_2_seconds
-                    and self._idle_warning_count == 1
-                ):
-                    self._idle_warning_count = 2
-                    await self._send_idle_warning(2)
-
-                # Disconnect at full timeout (30s)
-                elif (
-                    idle_duration >= self._idle_timeout_seconds
-                    and self._idle_warning_count >= 2
-                ):
-                    self._logger.info(
-                        f"[IDLE] User idle for {idle_duration:.1f}s, disconnecting"
-                    )
-                    await self._handle_idle_disconnect()
-                    break
-
-        except asyncio.CancelledError:
-            self._logger.debug("[IDLE] Monitor task cancelled")
-        except Exception as e:
-            self._logger.error(f"[IDLE] Monitor error: {e}")
-
-    async def _send_idle_warning(self, warning_number: int) -> None:
-        """Send idle warning to user via agent speech."""
+    async def _send_speech(self, text: str) -> None:
+        """LiveKit implementation: speak via session.say or generate_reply."""
         if not self._session:
             return
-
-        # Get user language from config
-        user_language = (
-            self.config.get("preferred_language", "en") if self.config else "en"
-        )
-
-        # Get localized warning message
-        param = f"idle_warning_{warning_number}"
-        warning_msg = self.prompt_manager.get_message(user_language, param)
-        if not warning_msg:
-            # Fallback to English
-            warning_msg = self.prompt_manager.get_message("en", param)
-
-        self._logger.info(f"[IDLE] Sending warning {warning_number}: {warning_msg}")
-
-        try:
-            self._sending_idle_warning = True
-            # In full realtime mode, TTS is not available - use generate_reply instead
-            if self._is_full_realtime:
-                await self._session.generate_reply(
-                    instructions=f"Say to the user: {warning_msg}"
-                )
-            else:
-                await self._session.say(warning_msg)
-        except Exception as e:
-            self._logger.error(f"[IDLE] Failed to send warning: {e}")
-        finally:
-            self._sending_idle_warning = False
-
-    async def _ensure_post_call_triggered(self, reason: str = "session_end") -> None:
-        if not self.user_state:
-            self._logger.warning(
-                "[POST_CALL] No user_state available, skipping post-call trigger"
+        if self._is_full_realtime:
+            await self._session.generate_reply(
+                instructions=f"Say to the user: {text}"
             )
-            return
+        else:
+            await self._session.say(text)
 
-        if not isinstance(self.user_state.extra_data, dict):
-            self.user_state.extra_data = {}
-
-        # Check if post-call was already triggered
-        if self.user_state.extra_data.get("post_call_triggered"):
-            self._logger.info(
-                f"[POST_CALL] Already triggered, skipping (reason={reason})"
-            )
-            return
-
-        # Skip for SDK calls
-        if self.user_state.extra_data.get("call_type") == "sdk":
-            self._logger.info("[POST_CALL] SDK call, skipping post-call workflow")
-            return
-
-        # Mark as triggered to prevent duplicates
-        self.user_state.extra_data["post_call_triggered"] = True
-
-        # Set end time if not already set
-        if not self.user_state.end_time:
-            self.user_state.end_time = datetime.utcnow()
-
-        # Set call status if still active/unknown
-        if not self.user_state.call_status or self.user_state.call_status in (
-            CallStatusEnum.InCall,
-            CallStatusEnum.CONNECTED,
+    async def _disconnect_participant(self) -> None:
+        """LiveKit implementation: delete room to disconnect all participants."""
+        reason = getattr(
+            self,
+            "_disconnect_reason_override",
             None,
-        ):
-            self.user_state.call_status = CallStatusEnum.COMPLETED
-
-        self._logger.info(
-            f"[POST_CALL] Triggering post-call workflow (reason={reason}, "
-            f"status={self.user_state.call_status})"
-        )
-
-        try:
-            res = await build_call_result(self.user_state)
-            await trigger_post_call(user_state=self.user_state, res=res)
-            self._logger.info(
-                f"{'=' * 100}\n\n[POST_CALL] Successfully triggered post-call "
-                f"workflow (reason={reason})\n\n{'=' * 100}"
-            )
-        except Exception as e:
-            self._logger.error(f"[POST_CALL] Failed to trigger post-call: {e}")
-            import traceback
-            self._logger.error(traceback.format_exc())
-
-
-    async def _handle_idle_disconnect(self) -> None:
-        """Handle disconnect due to user inactivity - delete room to end call."""
-        if self._is_shutting_down:
-            return
-
-        self._is_shutting_down = True
-        self._logger.info("[IDLE] Disconnecting due to user inactivity")
-
-        if not isinstance(self.user_state.extra_data, dict):
-            self.user_state.extra_data = {}
-
-        if self.user_state.extra_data.get("call_type") != "sdk":
-            self.user_state.call_status = CallStatusEnum.COMPLETED
-            self.user_state.end_time = datetime.utcnow()
-
-            res = await build_call_result(self.user_state)
-            await trigger_post_call(user_state=self.user_state, res=res)
-            # Mark post-call as triggered to prevent duplicates
-            self.user_state.extra_data["post_call_triggered"] = True
-            self._logger.info(
-                f"{'=' * 100}\n\n[IDLE_DISCONNECT] Triggering post call\n\n{'=' * 100}"
-            )
-
-        # Send goodbye message
-        if self._session:
-            try:
-                goodbye_msg = "No response detected. Goodbye! Have a great day."
-                await self._session.generate_reply(instructions=goodbye_msg)
-                # Brief delay for TTS to complete
-                await asyncio.sleep(2.0)
-            except Exception as e:
-                self._logger.error(f"[IDLE] Failed to send goodbye: {e}")
-
-        # Delete the room to properly end the call
+        ) or "disconnect_fallback"
         if self._job_context and hasattr(self._job_context, "room"):
             room_name = self._job_context.room.name
             try:
                 from livekit import api
 
-                self._logger.info(f"[IDLE] Deleting room: {room_name}")
+                self._logger.info(f"[DISCONNECT] Deleting room: {room_name}")
                 await self._job_context.api.room.delete_room(
                     api.DeleteRoomRequest(room=room_name)
                 )
-                self._logger.info(f"[IDLE] Room deleted successfully: {room_name}")
-                self._signal_disconnect_event("idle_room_deleted")
+                self._logger.info(f"[DISCONNECT] Room deleted: {room_name}")
+                self._signal_disconnect_event("room_deleted")
             except Exception as e:
-                self._logger.error(f"[IDLE] Failed to delete room: {e}")
-                await self.end_call("idle_timeout")
+                self._logger.error(f"[DISCONNECT] Failed to delete room: {e}")
+                await self.end_call(reason)
         else:
-            await self.end_call("idle_timeout")
+            await self.end_call(reason)
 
-    # -------------------------------------------------------------------------
-    # Goodbye Detection (Deprecated - now handled by end_call tool)
-    # -------------------------------------------------------------------------
+    def _get_conversation_messages(self) -> list:
+        """LiveKit implementation: get messages from session chat context."""
+        if self._session and hasattr(self._session, "chat_ctx"):
+            return list(self._session.chat_ctx.messages)
+        return []
 
-    # NOTE: Goodbye detection is now primarily handled by the end_call tool,
-    # which allows the LLM to decide based on conversation context.
-    # These patterns are kept as a minimal safety fallback but are no longer
-    # actively called from event handlers.
-    #
-    # Removed ambiguous patterns that caused false positives:
-    # - "okay", "ok" - common acknowledgments
-    # - "that's it", "that's all", "done" - too context-dependent
-    GOODBYE_PATTERNS = [
-        "bye",
-        "goodbye",
-        "good bye",
-        "bye-bye",
-        "bye bye",
-        "ok bye",
-        "okay bye",
-        "see you",
-        "take care",
-        "hang up",
-        "end call",
-        "disconnect",
-        # Hindi/Urdu
-        "alvida",
-        "phir milenge",
-        "theek hai bye",
-        "chalo bye",
-        # Combined farewells
-        "thank you bye",
-        "thanks bye",
-        "thankyou bye",
-    ]
+    async def _append_context_message(
+        self, role: str, content: str, run_llm: bool = False
+    ) -> None:
+        """LiveKit implementation: append to session chat context."""
+        if self._session and hasattr(self._session, "chat_ctx"):
+            self._session.chat_ctx.append(role=role, text=content)
+            if run_llm:
+                await self._session.generate_reply()
 
-    def _is_goodbye_intent(self, transcript: str) -> bool:
-        """Check if transcript contains goodbye intent.
-
-        NOTE: This method is deprecated. Goodbye detection is now handled
-        by the end_call tool which has full conversation context.
-        """
-        transcript_lower = transcript.lower().strip()
-        # Remove common punctuation for matching
-        transcript_clean = transcript_lower.rstrip("!.,?")
-
-        self._logger.debug(f"[GOODBYE_CHECK] Checking transcript: '{transcript_lower}'")
-
-        for pattern in self.GOODBYE_PATTERNS:
-            # Exact match
-            if transcript_lower == pattern or transcript_clean == pattern:
-                self._logger.info(f"[GOODBYE_CHECK] Matched pattern: '{pattern}'")
-                return True
-            # Starts with pattern
-            if transcript_lower.startswith(
-                f"{pattern} "
-            ) or transcript_clean.startswith(f"{pattern} "):
-                self._logger.info(f"[GOODBYE_CHECK] Starts with pattern: '{pattern}'")
-                return True
-            # Ends with "bye" (catch phrases like "okay bye", "alright bye", etc.)
-            if transcript_lower.endswith(" bye") or transcript_clean.endswith(" bye"):
-                self._logger.info(
-                    f"[GOODBYE_CHECK] Ends with 'bye': '{transcript_lower}'"
-                )
-                return True
-
-        return False
+    def _is_agent_speaking(self) -> bool:
+        """LiveKit implementation: check agent state."""
+        return self._agent_state == "speaking"
 
     async def _handle_goodbye_intent(self) -> None:
         """Handle goodbye intent - say goodbye and delete room to end session."""

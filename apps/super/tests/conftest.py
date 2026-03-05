@@ -1,20 +1,35 @@
 import sys
 import types
+import os
 from unittest.mock import MagicMock
 
 
 def pytest_configure(config):
     """Disable the nameko plugin to avoid eventlet issues"""
     config.pluginmanager.set_blocked("nameko")
+    os.environ.setdefault("SKIP_DB_CHECK", "1")
 
-    # Mock mongomantic to avoid pydantic version conflicts
-    mongomantic_mock = MagicMock()
-    # Provide mock classes that don't have metaclass conflicts
-    mongomantic_mock.MongoDBModel = type("MongoDBModel", (), {})
-    mongomantic_mock.BaseRepository = type("BaseRepository", (), {})
-    mongomantic_mock.Index = MagicMock()
-    mongomantic_mock.connect = MagicMock()
-    sys.modules["mongomantic"] = mongomantic_mock
+    # Mock mongomantic to avoid pydantic version conflicts.
+    # Use real module stubs so nested imports like `mongomantic.core.errors`
+    # work during eval test collection.
+    mongomantic_module = types.ModuleType("mongomantic")
+    mongomantic_core_module = types.ModuleType("mongomantic.core")
+    mongomantic_errors_module = types.ModuleType("mongomantic.core.errors")
+
+    class DoesNotExistError(Exception):
+        """Stub mongomantic DoesNotExistError used by eval imports."""
+
+    # Provide mock classes that don't have metaclass conflicts.
+    mongomantic_module.MongoDBModel = type("MongoDBModel", (), {})
+    mongomantic_module.BaseRepository = type("BaseRepository", (), {})
+    mongomantic_module.Index = MagicMock()
+    mongomantic_module.connect = MagicMock()
+    mongomantic_core_module.errors = mongomantic_errors_module
+    mongomantic_errors_module.DoesNotExistError = DoesNotExistError
+
+    sys.modules["mongomantic"] = mongomantic_module
+    sys.modules["mongomantic.core"] = mongomantic_core_module
+    sys.modules["mongomantic.core.errors"] = mongomantic_errors_module
 
     # Mock bson module for MongoDB dependencies. Use real module objects so
     # imports like `from bson.objectid import InvalidId` keep working.

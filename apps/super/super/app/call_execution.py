@@ -13,15 +13,12 @@ from super.core.callback.base import BaseCallback
 from super.core.configuration import BaseModelConfig
 from super.core.logging import logging
 from super.core.logging.logging import print_log
-from super.core.voice.workflows.post_call import PostCallWorkflow
-from super.core.voice.workflows.dspy_config import get_dspy_lm
 from super_services.libs.core.timezone_utils import normalize_phone_number
 from super_services.voice.common.threads import (
     # create_thread_post,
     get_user_id,
 )
 from super.core.voice.schema import UserState
-from super.core.voice.workflows.pre_call import PreCallWorkFlow
 
 STORE_SERVICE_URL = os.environ.get("STORE_SERVICE_URL", "http://127.0.0.1:9118")
 BULK_UPDATE_API = STORE_SERVICE_URL + "/api/v1/store/collection-doc-bulk-update/"
@@ -572,6 +569,8 @@ async def execute_post_call_workflow(
     user_state: UserState = None,
 ):
     from super_services.db.services.models.task import TaskModel
+    from super.core.voice.workflows.post_call import PostCallWorkflow
+    from super.core.voice.workflows.dspy_config import get_dspy_lm
 
     # Create process-local LM instance early to avoid threading issues
     lm = get_dspy_lm()
@@ -658,6 +657,8 @@ async def execute_post_call_workflow(
 
 
 async def execute_pre_call_workflow(task_id, data, agent_id):
+    from super.core.voice.workflows.pre_call import PreCallWorkFlow
+
     executor = PreCallWorkFlow(
         task_id=task_id,
         data=data,

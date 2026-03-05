@@ -9,11 +9,15 @@ export PYDANTIC_DISABLE_PLUGINS="${PYDANTIC_DISABLE_PLUGINS:-__all__}"
 export PYTHONPATH="$ROOT_DIR"
 
 PYTHON_BIN="python"
-if [[ -x "$ROOT_DIR/venv/bin/python" ]]; then
+if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+elif [[ -x "$ROOT_DIR/venv/bin/python" ]]; then
   PYTHON_BIN="$ROOT_DIR/venv/bin/python"
 else
   MAIN_WORKTREE="$(git worktree list --porcelain | awk '/^worktree / {print $2; exit}')"
-  if [[ -n "$MAIN_WORKTREE" && -x "$MAIN_WORKTREE/venv/bin/python" ]]; then
+  if [[ -n "$MAIN_WORKTREE" && -x "$MAIN_WORKTREE/.venv/bin/python" ]]; then
+    PYTHON_BIN="$MAIN_WORKTREE/.venv/bin/python"
+  elif [[ -n "$MAIN_WORKTREE" && -x "$MAIN_WORKTREE/venv/bin/python" ]]; then
     PYTHON_BIN="$MAIN_WORKTREE/venv/bin/python"
   fi
 fi
@@ -25,6 +29,7 @@ VOICE_AGENT_TESTS=(
   "tests/core/voice/test_voice_agent_handler_startup.py"
   "tests/core/voice/test_config_resolution_latency.py"
   "tests/core/voice/test_startup_background_tasks.py"
+  "tests/core/voice/test_shared_voice_refactor_parity.py"
   "tests/core/voice/livekit/test_lite_handler_connect_guard.py"
   "tests/core/voice/test_startup_latency_regression.py"
   "tests/core/voice/livekit/test_harness_fakes.py"
@@ -34,6 +39,7 @@ VOICE_AGENT_TESTS=(
   "tests/core/voice/livekit/test_lite_handler_parsing_response.py"
   "tests/core/voice/livekit/test_lite_handler_session_flow.py"
   "tests/core/voice/livekit/test_lite_handler_idle_goodbye.py"
+  "tests/core/voice/livekit/test_lite_handler_cleanup.py"
   "tests/core/voice/managers/test_knowledge_base_manager.py"
   "tests/core/voice/livekit/test_livekit_lite_agent_context.py"
   "tests/core/voice/livekit/test_livekit_lite_agent_tools.py"

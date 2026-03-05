@@ -10,7 +10,7 @@ import psycopg2
 class Settings(State):
     def __init__(self, *args, **kwargs):
         SETTINGS_MODULE = os.environ.setdefault(
-            "SETTINGS_FILE", "super_services.settings.local"
+            "SETTINGS_FILE", "super_services.settings.qa"
         )
         print("Running Server Using Settings Module", SETTINGS_MODULE)
         settings_module = import_module(SETTINGS_MODULE)

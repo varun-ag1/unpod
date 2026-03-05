@@ -9,7 +9,7 @@ from typing import Dict, Optional, List
 # from dateutil import parser
 import json
 
-from super.app.providers import CallProviderFactory, VapiProvider
+from super.app.providers import CallProviderFactory
 from super.core.logging.logging import print_log
 from super_services.db.services.models.task import (
     RunModel,
@@ -1085,6 +1085,7 @@ class TaskService:
                     # print(result)
                     # Fetch call status from provider
                     provider = CallProviderFactory.create_provider(task_input)
+                    from super.app.providers.vapi_provider import VapiProvider
                     if isinstance(provider, VapiProvider):
                         result = asyncio.run(provider.update_call_data(task))
                         task.output = result

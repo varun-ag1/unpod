@@ -36,6 +36,7 @@ VOICE_AGENT_TESTS=(
   "tests/core/voice/test_voice_agent_handler_startup.py"
   "tests/core/voice/test_config_resolution_latency.py"
   "tests/core/voice/test_startup_background_tasks.py"
+  "tests/core/voice/test_shared_voice_refactor_parity.py"
   "tests/core/voice/livekit/test_lite_handler_connect_guard.py"
   "tests/core/voice/test_startup_latency_regression.py"
   "tests/core/voice/livekit/test_harness_fakes.py"

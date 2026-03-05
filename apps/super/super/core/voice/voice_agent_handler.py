@@ -3556,6 +3556,60 @@ class VoiceAgentHandler(BaseVoiceHandler, ABC):
         except Exception as e:
             self._logger.error(f"Error during sync cleanup: {e}")
 
+    async def test_entrypoint(self,ctx:JobContext):
+        self._temp_perf_logs = []
+        self._room_events_registered = False
+        try:
+            lk_url = os.getenv("LIVEKIT_URL", "")
+            lk_key = os.getenv("LIVEKIT_API_KEY", "")
+            lk_secret = os.getenv("LIVEKIT_API_SECRET", "")
+            self._logger.info(
+                f"[DEBUG] LiveKit credentials check - "
+                f"URL set: {bool(lk_url)} ({lk_url[:30]}...) | "
+                f"API_KEY set: {bool(lk_key)} (len={len(lk_key)}) | "
+                f"API_SECRET set: {bool(lk_secret)} (len={len(lk_secret)})"
+            )
+
+
+            await ctx.connect()
+
+            self._job_context = ctx
+
+            user_data={}
+            model_config=await self._get_config_with_cache("mohali-city-centre-efj24n2fyyw2")
+            user_state = UserState(
+                user_name=user_data.get("contact_name", "User"),
+                space_name=user_data.get("space_name", "Unpod AI"),
+                contact_number=user_data.get("contact_number"),
+                token=user_data.get("token", ""),
+                language=model_config.get("language", "English"),
+                thread_id=str(user_data.get("thread_id", "")),
+                user=user_data.get("user", {}),
+                model_config=model_config,
+                persona=model_config.get("persona"),
+                system_prompt=model_config.get("script"),
+                first_message=model_config.get("first_message"),
+                knowledge_base=model_config.get("knowledge_base", []),
+                start_time=datetime.utcnow(),
+                usage=create_default_usage(model_config),
+                transcript=[],
+                room_name=ctx.room.name,
+                task_id=user_data.get("task_id", ""),
+                extra_data={"perf_logs": self._temp_perf_logs},
+            )
+            self.user_state = user_state
+            _get_handlers = asyncio.create_task(
+                self._get_handler_classes(ctx=ctx), name="handler_class"
+            )
+            handler_class, handler_name = await _get_handlers
+
+            await self._create_assistant( user_state, ctx, handler_class, handler_name)
+
+            await self.run_agent( ctx,user_state, self._agent)
+
+        except Exception as e:
+            pass
+
     def execute_agent(self):
         """Execute agent worker - synchronous wrapper for cli.run_app"""
         try:

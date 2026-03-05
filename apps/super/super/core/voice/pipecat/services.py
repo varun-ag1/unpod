@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional
 from dotenv import load_dotenv
 
 from super.core.voice.managers.tools_manager import ToolsManager
+from super.core.voice.prompts.language_accent import LANGUAGE_ACCENT_PROMPT
 from super.core.voice.services.service_common import (
     DEFAULT_TTS_PROVIDER,
     DEFAULT_TTS_MODEL,
@@ -23,6 +24,7 @@ from super.core.voice.services.service_common import (
     GEMINI_LANGUAGE_MAP,
     GEMINI_REALTIME_MODELS,
     GEMINI_REALTIME_VOICES,
+    GEMINI_TTS_MODELS,
     LLM_FALLBACK_CHAIN,
     STT_FALLBACK_CHAIN,
     TTS_FALLBACK_CHAIN,
@@ -77,14 +79,33 @@ except ImportError:
     SessionProperties = None
     OPENAI_REALTIME_AVAILABLE = False
 
-# Gemini Live Vertex imports
+# Gemini Live imports (Vertex and API)
 try:
     from pipecat.services.google.gemini_live.llm_vertex import GeminiLiveVertexLLMService
 
-    GEMINI_LIVE_AVAILABLE = True
+    GEMINI_LIVE_VERTEX_AVAILABLE = True
 except ImportError:
     GeminiLiveVertexLLMService = None
-    GEMINI_LIVE_AVAILABLE = False
+    GEMINI_LIVE_VERTEX_AVAILABLE = False
+
+try:
+    from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+
+    GEMINI_LIVE_API_AVAILABLE = True
+except ImportError:
+    GeminiLiveLLMService = None
+    GEMINI_LIVE_API_AVAILABLE = False
+
+GEMINI_LIVE_AVAILABLE = GEMINI_LIVE_VERTEX_AVAILABLE or GEMINI_LIVE_API_AVAILABLE
+
+# Gemini TTS imports
+try:
+    from pipecat.services.google.tts import GeminiTTSService
+
+    GEMINI_TTS_AVAILABLE = True
+except ImportError:
+    GeminiTTSService = None
+    GEMINI_TTS_AVAILABLE = False
 
 
 class DualLanguageTTS(ParallelPipeline):
@@ -439,113 +460,120 @@ class ServiceFactory:
         self, assistant_prompt: Optional[str] = None
     ) -> Optional[Any]:
         """
-        Create Gemini Live Vertex LLM service with audio configuration.
+        Create Gemini Live LLM service with full feature parity.
 
-        Gemini Live provides:
+        Supports both Vertex AI (credentials-based) and Gemini API (key-based).
+        Features:
         - Native audio input/output (no separate STT/TTS needed)
         - Lower latency (end-to-end voice)
         - Function calling support
-        - Multiple voice options: Aoede, Charon, Fenrir, Kore, Puck
+        - Voice validation (Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr, Achernar)
+        - Mixed realtime mode auto-detection
+        - Thinking mode, affective dialog, proactivity
+        - Language accent prompt
 
         Args:
             assistant_prompt: Full prompt from prompt_manager (system instruction)
 
         Returns:
-            GeminiLiveVertexLLMService instance or None on failure
+            GeminiLiveLLMService or GeminiLiveVertexLLMService instance, or None
         """
         if not GEMINI_LIVE_AVAILABLE:
             self._logger.error(
                 "Gemini Live API not available. "
-                "Install with: pip install 'pipecat[google]'"
+                "Install with: pip install 'pipecat-ai[google]'"
             )
             return None
 
         try:
-            # Use assistant_prompt if provided, otherwise fallback to system_prompt from config
-            instructions = assistant_prompt or self.config.get(
+            # Build instructions with language accent prompt
+            base_instructions = assistant_prompt or self.config.get(
                 "system_prompt",
-                """
-                You are a helpful and friendly AI assistant.
-
-                You are participating in a voice conversation. Keep your responses concise, short, and to the point
-                unless specifically asked to elaborate on a topic.
-
-                Remember, your responses should be short. Just one or two sentences, usually.""",
+                "You are a helpful and friendly AI assistant. "
+                "You are participating in a voice conversation. Keep your responses concise, "
+                "short, and to the point unless specifically asked to elaborate on a topic. "
+                "Remember, your responses should be short. Just one or two sentences, usually.",
             )
+            instructions = f"{base_instructions}\n\n{LANGUAGE_ACCENT_PROMPT}"
 
-            # Get voice configuration
-            # Gemini Live voices: Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr
+            # Get voice and model configuration
             tts_cfg = self.tts_config
             llm_cfg = self.llm_config
-            voice = tts_cfg.voice or "Puck"
 
-            # Validate voice using constants
-            if voice not in GEMINI_REALTIME_VOICES:
-                self._logger.warning(
-                    f"Invalid Gemini Live voice '{voice}', defaulting to 'Puck'. "
-                    f"Valid voices: {', '.join(GEMINI_REALTIME_VOICES)}"
+            voice = self._common.validate_gemini_realtime_voice(
+                tts_cfg.voice, default="Puck"
+            )
+            model = llm_cfg.model or "gemini-2.5-flash-native-audio-preview-12-2025"
+
+            # Mixed mode auto-detection (mirrors livekit_services.py)
+            tts_provider = tts_cfg.provider.lower()
+            tts_model = (tts_cfg.model or "").lower()
+            explicit_mixed_raw = self.config.get(
+                "mixed_realtime_mode",
+                os.getenv("MIXED_REALTIME_MODE", "false").lower() == "true",
+            )
+            if isinstance(explicit_mixed_raw, str):
+                explicit_mixed = explicit_mixed_raw.lower() == "true"
+            else:
+                explicit_mixed = bool(explicit_mixed_raw)
+            tts_uses_same_realtime = (
+                tts_provider in ("google", "gemini")
+                and (tts_model == model.lower() or tts_model == "")
+            )
+            auto_mixed = not tts_uses_same_realtime
+            if tts_uses_same_realtime:
+                mixed_realtime_mode = False
+                if explicit_mixed:
+                    self._logger.info(
+                        "Forcing full realtime mode: TTS model matches realtime LLM model"
+                    )
+            else:
+                mixed_realtime_mode = True
+            if auto_mixed and not explicit_mixed:
+                self._logger.info(
+                    f"Auto-enabling mixed realtime mode: TTS ({tts_provider}/{tts_model}) "
+                    f"differs from Gemini realtime LLM ({model})"
                 )
-                voice = "Puck"
 
-            # Get credentials configuration
-            credentials = self.config.get(
-                "google_credentials", os.getenv("GOOGLE_CREDENTIALS")
-            )
-            project_id = self.config.get(
-                "google_project_id", os.getenv("GOOGLE_CLOUD_PROJECT_ID")
-            )
-            location = self.config.get(
-                "google_location", os.getenv("GOOGLE_CLOUD_LOCATION", "asia-south1")
-            )
+            # Override instance mixed_realtime_mode for settings builder
+            self.mixed_realtime_mode = mixed_realtime_mode
 
-            if not credentials or not project_id:
-                self._logger.error(
-                    "Gemini Live requires google_credentials and google_project_id. "
-                    "Set via config or env vars: GOOGLE_VERTEX_TEST_CREDENTIALS, GOOGLE_CLOUD_PROJECT_ID"
+            if mixed_realtime_mode:
+                self._logger.info(
+                    "Mixed Mode: Using Gemini Live LLM + separate TTS for audio output"
                 )
-                return None
-
-            # Get model configuration
-            # Valid models: gemini-2.5-flash, gemini-2.0-flash-live-001, gemini-2.0-flash-exp
-            model = llm_cfg.model or "gemini-2.5-flash"
-
-            # Validate model using constants
-            if model not in GEMINI_REALTIME_MODELS:
-                self._logger.warning(
-                    f"Invalid Gemini Live model '{model}', defaulting to 'gemini-2.5-flash'. "
-                    f"Valid models: {', '.join(GEMINI_REALTIME_MODELS)}"
+            else:
+                self._logger.info(
+                    "Full Realtime Mode: Gemini Live (integrated audio)"
                 )
-                model = "gemini-2.5-flash"
 
-            self._logger.info(
-                f"Creating Gemini Live Vertex LLM - model: {model}, voice: {voice}, "
-                f"project: {project_id}, location: {location}"
+            # Decide Vertex AI vs API key
+            use_vertex_ai = self.config.get(
+                "vertexai",
+                os.getenv("USE_VERTEX_AI", "false").lower() == "true",
             )
 
-            # Get Gemini Live-specific settings
+            # Get settings (params, tools)
             params, tools = self.get_gemini_realtime_settings(
                 instructions, model, voice
             )
 
-            # Create the service
-            # Gemini Live uses InputParams with modalities parameter
-            # - Mixed mode: modalities=TEXT for separate TTS
-            # - Full realtime: modalities=AUDIO for integrated audio
-            llm_service = GeminiLiveVertexLLMService(
-                credentials_path=credentials,
-                project_id=project_id,
-                location=location,
-                system_instruction=instructions,
-                start_audio_paused=True,
-                start_video_paused=True,
-                # params=params,
-                model=model,
-                voice_id=voice,
-                # tools=tools,
-            )
-
-            self._logger.info("✓ Gemini Live Vertex LLM service created successfully")
-            return llm_service
+            if use_vertex_ai and GEMINI_LIVE_VERTEX_AVAILABLE:
+                return self._create_gemini_live_vertex(
+                    instructions, model, voice, params, tools
+                )
+            elif GEMINI_LIVE_API_AVAILABLE:
+                return self._create_gemini_live_api(
+                    instructions, model, voice, params, tools
+                )
+            elif GEMINI_LIVE_VERTEX_AVAILABLE:
+                # Fallback to Vertex if API not available
+                return self._create_gemini_live_vertex(
+                    instructions, model, voice, params, tools
+                )
+            else:
+                self._logger.error("No Gemini Live service available")
+                return None
 
         except Exception as e:
             self._logger.error(f"Failed to create Gemini Live LLM service: {e}")
@@ -554,9 +582,108 @@ class ServiceFactory:
             self._logger.error(f"Traceback:\n{traceback.format_exc()}")
             return None
 
+    def _create_gemini_live_vertex(
+        self,
+        instructions: str,
+        model: str,
+        voice: str,
+        params: Optional[Any],
+        tools: list,
+    ) -> Optional[Any]:
+        """Create Gemini Live via Vertex AI (credentials-based)."""
+        credentials = self.config.get(
+            "google_credentials", os.getenv("GOOGLE_CREDENTIALS")
+        )
+        project_id = self.config.get(
+            "google_project_id", os.getenv("GOOGLE_CLOUD_PROJECT_ID")
+        )
+        location = self.config.get(
+            "google_location", os.getenv("GOOGLE_CLOUD_LOCATION", "asia-south1")
+        )
+
+        if not credentials or not project_id:
+            self._logger.error(
+                "Gemini Live Vertex requires google_credentials and google_project_id. "
+                "Set via config or env vars: GOOGLE_CREDENTIALS, GOOGLE_CLOUD_PROJECT_ID"
+            )
+            return None
+
+        # Map API model names to Vertex model names
+        vertex_model = model
+        if model == "gemini-2.5-flash-native-audio-preview-12-2025":
+            vertex_model = "gemini-live-2.5-flash-native-audio"
+        elif model == "gemini-2.0-flash-exp":
+            vertex_model = "gemini-live-2.5-flash-native-audio"
+
+        self._logger.info(
+            f"Creating Gemini Live Vertex LLM - model: {vertex_model}, voice: {voice}, "
+            f"project: {project_id}, location: {location}"
+        )
+
+        kwargs: Dict[str, Any] = {
+            "credentials_path": credentials,
+            "project_id": project_id,
+            "location": location,
+            "system_instruction": instructions,
+            "start_audio_paused": True,
+            "start_video_paused": True,
+            "model": vertex_model,
+            "voice_id": voice,
+        }
+
+        if params:
+            kwargs["params"] = params
+        if tools:
+            kwargs["tools"] = tools
+
+        llm_service = GeminiLiveVertexLLMService(**kwargs)
+        self._logger.info("Gemini Live Vertex LLM service created successfully")
+        return llm_service
+
+    def _create_gemini_live_api(
+        self,
+        instructions: str,
+        model: str,
+        voice: str,
+        params: Optional[Any],
+        tools: list,
+    ) -> Optional[Any]:
+        """Create Gemini Live via API key (non-Vertex)."""
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            self._logger.error(
+                "Gemini Live API requires GOOGLE_API_KEY env var."
+            )
+            return None
+
+        self._logger.info(
+            f"Creating Gemini Live API LLM - model: {model}, voice: {voice}"
+        )
+
+        kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "system_instruction": instructions,
+            "start_audio_paused": False,
+            "start_video_paused": True,
+            "model": model,
+            "voice_id": voice,
+        }
+
+        if params:
+            kwargs["params"] = params
+        if tools:
+            kwargs["tools"] = tools
+
+        llm_service = GeminiLiveLLMService(**kwargs)
+        self._logger.info("Gemini Live API LLM service created successfully")
+        return llm_service
+
     def get_gemini_realtime_settings(self, instructions, model, voice):
         """
         Build Gemini Live-specific configuration parameters.
+
+        Supports: temperature, max_tokens, modalities, language, thinking,
+        affective dialog, proactivity, VAD params.
 
         Returns:
             Tuple of (InputParams or None, tools list)
@@ -577,28 +704,21 @@ class ServiceFactory:
             max_tokens = self.config.get("max_tokens", 4096)
 
             # Determine modalities based on mode
-            # Mixed mode: TEXT output for separate TTS
-            # Full realtime: AUDIO output (integrated TTS)
+            from pipecat.services.google.gemini_live.llm_vertex import (
+                GeminiModalities,
+            )
+
             if self.mixed_realtime_mode:
-                from pipecat.services.google.gemini_live.llm_vertex import (
-                    GeminiModalities,
-                )
-
                 modalities = GeminiModalities.TEXT
-                self._logger.info("🔀 Mixed mode: modalities=TEXT for separate TTS")
+                self._logger.info("Mixed mode: modalities=TEXT for separate TTS")
             else:
-                from pipecat.services.google.gemini_live.llm_vertex import (
-                    GeminiModalities,
-                )
-
                 modalities = GeminiModalities.AUDIO
                 self._logger.info(
-                    "⚡ Full realtime: modalities=AUDIO (integrated audio)"
+                    "Full realtime: modalities=AUDIO (integrated audio)"
                 )
 
             # Get language configuration
             language_code = self.config.get("language", "en")
-            # Map language codes to Gemini Language enum
             language_map = {
                 "en": Language.EN_IN,
                 "en-us": Language.EN_US,
@@ -609,22 +729,53 @@ class ServiceFactory:
             }
             language = language_map.get(language_code.lower(), Language.EN_IN)
 
-            # Create InputParams for Gemini Live
-            params = InputParams(
-                temperature=temperature,
-                max_tokens=max_tokens,
-                modalities=modalities,
-                language=language,
-            )
+            # Build InputParams with all supported features
+            params_kwargs: Dict[str, Any] = {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "modalities": modalities,
+                "language": language,
+            }
+
+            # Thinking mode (for native-audio models)
+            thinking_enabled = self.config.get("thinking_enabled", False)
+            if thinking_enabled:
+                try:
+                    from google.genai import types as genai_types
+
+                    params_kwargs["thinking"] = genai_types.ThinkingConfig(
+                        include_thoughts=self.config.get("include_thoughts", False),
+                    )
+                    self._logger.info("Thinking mode enabled")
+                except ImportError:
+                    self._logger.warning("ThinkingConfig not available")
+
+            # Affective dialog (supported models only)
+            if self.config.get("enable_affective_dialog", False):
+                params_kwargs["enable_affective_dialog"] = True
+                self._logger.info("Affective dialog enabled")
+
+            # Proactivity (supported models only)
+            if self.config.get("proactivity", False):
+                try:
+                    from google.genai import types as genai_types
+
+                    params_kwargs["proactivity"] = genai_types.ProactivityConfig(
+                        proactive_audio=True,
+                    )
+                    self._logger.info("Proactivity enabled")
+                except (ImportError, AttributeError):
+                    self._logger.warning("ProactivityConfig not available")
+
+            params = InputParams(**params_kwargs)
 
             self._logger.info(
                 f"Creating Gemini Live - model: {model}, voice: {voice}, "
                 f"temperature: {temperature}, max_tokens: {max_tokens}"
             )
 
-            # Log tools
             if tools:
-                self._logger.info(f"✓ Registered {len(tools)} tools for Gemini Live")
+                self._logger.info(f"Registered {len(tools)} tools for Gemini Live")
 
             return params, tools
 
@@ -772,8 +923,8 @@ class ServiceFactory:
             self._logger.info("Using OpenAI Realtime API mode")
             return self._create_openai_realtime_llm_service(assistant_prompt)
 
-        if self.use_realtime and provider_normalized == "google":
-            self._logger.info("Using Gemini Live Vertex API mode")
+        if self.use_realtime and provider_normalized in ("google", "gemini"):
+            self._logger.info("Using Gemini Live API mode")
             return self._create_gemini_live_llm_service(assistant_prompt)
 
         # Route ALL inference-supported providers through LiveKit gateway
@@ -802,12 +953,23 @@ class ServiceFactory:
                     temperature, max_tokens, cache_key
                 ),
                 "groq": lambda: self._create_groq_llm(temperature, max_tokens),
-                "cerebras": lambda: self._create_cerebras_llm(temperature, max_tokens),
+                "cerebras": lambda: self._create_cerebras_llm(
+                    temperature, max_tokens
+                ),
                 "ollama": lambda: self._create_ollama_llm(temperature, max_tokens),
                 "google": lambda: self._create_google_vertex_llm(
                     temperature, max_tokens
                 ),
-                "aws": lambda: self._create_aws_bedrock_llm(temperature, max_tokens),
+                "aws": lambda: self._create_aws_bedrock_llm(
+                    temperature, max_tokens
+                ),
+                "xai": lambda: self._create_xai_llm(temperature, max_tokens),
+                "qwen": lambda: self._create_qwen_llm(
+                    temperature, max_tokens
+                ),
+                "openrouter": lambda: self._create_openrouter_llm(
+                    temperature, max_tokens
+                ),
             }
 
             creator = creators.get(provider_normalized)
@@ -1081,10 +1243,138 @@ class ServiceFactory:
         from pipecat.services.aws.llm import AWSBedrockLLMService
 
         cfg = self.llm_config
+        model = cfg.model or "anthropic.claude-sonnet-4-20250514-v1:0"
+
+        # AWS Bedrock newer models require inference profiles
+        aws_inference_profile_map = {
+            "anthropic.claude-haiku-4-5-20251001-v1:0": (
+                "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+            ),
+            "anthropic.claude-3-5-haiku-20241022-v1:0": (
+                "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+            ),
+            "anthropic.claude-3-5-sonnet-20241022-v2:0": (
+                "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+            ),
+            "anthropic.claude-3-5-sonnet-20240620-v1:0": (
+                "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
+            ),
+        }
+
+        inference_profile = self.config.get("aws_inference_profile")
+        if inference_profile:
+            actual_model = inference_profile
+            self._logger.info(
+                f"Using AWS inference profile: {actual_model}"
+            )
+        elif model in aws_inference_profile_map:
+            actual_model = aws_inference_profile_map[model]
+            self._logger.info(
+                f"AWS Bedrock: Mapped {model} to profile {actual_model}"
+            )
+        else:
+            actual_model = model
+
         llm_service = AWSBedrockLLMService(
             aws_region=self.config.get("region", "ap-south-1"),
-            model=cfg.model or "anthropic.claude-sonnet-4-20250514-v1:0",
+            model=actual_model,
             params=AWSBedrockLLMService.InputParams(
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+            ),
+        )
+        self._register_docs_if_needed(llm_service)
+        return llm_service
+
+    def _create_xai_llm(
+        self, temperature: float, max_tokens: int
+    ) -> Optional[Any]:
+        """xAI (Grok) LLM via OpenAI-compatible API."""
+        from pipecat.services.openai.llm import OpenAILLMService
+
+        cfg = self.llm_config
+        api_key = os.getenv("XAI_API_KEY")
+        if not api_key:
+            self._logger.warning(
+                "XAI_API_KEY not set, using OpenAI fallback"
+            )
+            return OpenAILLMService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model="gpt-4o",
+                params=OpenAILLMService.InputParams(
+                    temperature=temperature,
+                ),
+            )
+
+        llm_service = OpenAILLMService(
+            api_key=api_key,
+            base_url="https://api.x.ai/v1",
+            model=cfg.model or "grok-3",
+            params=OpenAILLMService.InputParams(
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+            ),
+        )
+        self._register_docs_if_needed(llm_service)
+        return llm_service
+
+    def _create_qwen_llm(
+        self, temperature: float, max_tokens: int
+    ) -> Optional[Any]:
+        """Qwen models via Cerebras API."""
+        from pipecat.services.openai.llm import OpenAILLMService
+
+        cfg = self.llm_config
+        api_key = os.getenv("CEREBRAS_API_KEY")
+        if not api_key:
+            self._logger.warning(
+                "CEREBRAS_API_KEY not set, using OpenAI fallback"
+            )
+            return OpenAILLMService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model="gpt-4o",
+                params=OpenAILLMService.InputParams(
+                    temperature=temperature,
+                ),
+            )
+
+        llm_service = OpenAILLMService(
+            api_key=api_key,
+            base_url="https://api.cerebras.ai/v1",
+            model=cfg.model or "qwen-3-32b",
+            params=OpenAILLMService.InputParams(
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+            ),
+        )
+        self._register_docs_if_needed(llm_service)
+        return llm_service
+
+    def _create_openrouter_llm(
+        self, temperature: float, max_tokens: int
+    ) -> Optional[Any]:
+        """OpenRouter LLM - access multiple models via single API."""
+        from pipecat.services.openai.llm import OpenAILLMService
+
+        cfg = self.llm_config
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            self._logger.warning(
+                "OPENROUTER_API_KEY not set, using OpenAI fallback"
+            )
+            return OpenAILLMService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model="gpt-4o",
+                params=OpenAILLMService.InputParams(
+                    temperature=temperature,
+                ),
+            )
+
+        llm_service = OpenAILLMService(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            model=cfg.model,
+            params=OpenAILLMService.InputParams(
                 temperature=temperature,
                 max_completion_tokens=max_tokens,
             ),
@@ -1285,7 +1575,16 @@ class ServiceFactory:
     def _create_cartesia_stt(self) -> Optional[Any]:
         from pipecat.services.cartesia.stt import CartesiaSTTService
 
-        return CartesiaSTTService(api_key=os.getenv("CARTESIA_API_KEY"))
+        cfg = self.stt_config
+        kwargs: Dict[str, Any] = {
+            "api_key": os.getenv("CARTESIA_API_KEY"),
+        }
+        if cfg.model:
+            kwargs["model"] = cfg.model
+        if cfg.language:
+            kwargs["language"] = self.get_language(cfg.language)
+
+        return CartesiaSTTService(**kwargs)
 
     def _create_fal_stt(self) -> Optional[Any]:
         from pipecat.services.fal.stt import FalSTTService
@@ -1688,44 +1987,233 @@ class ServiceFactory:
         """Validate and return a valid OpenAI TTS model."""
         return self._common.validate_openai_tts_model(model, default=default)
 
+    def _create_fallback_stt(self) -> Optional[Any]:
+        """Create fallback STT (OpenAI Whisper) as last resort."""
+        try:
+            from pipecat.services.openai.stt import OpenAISTTService
+
+            self._logger.warning(
+                "All STT fallbacks failed, using OpenAI Whisper defaults"
+            )
+            return OpenAISTTService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model="whisper-1",
+            )
+        except Exception as e:
+            self._logger.critical(f"Fallback STT also failed: {e}")
+            return None
+
     def _create_fallback_tts(
         self, user_language: Optional[str] = None
     ) -> Optional[Any]:
-        """
-        Create fallback TTS service using default provider.
-
-        Used when primary provider fails after retries. Provides:
-        - High quality voice synthesis
-        - Low latency streaming
-        - Multilingual support
-
-        Environment variables:
-        - FALLBACK_TTS_MODEL: TTS model (default: from DEFAULT_TTS_MODEL)
-        - FALLBACK_TTS_VOICE: Voice ID (default: from DEFAULT_TTS_VOICE)
-
-        Returns:
-            Fallback TTS service or None if even fallback fails
-        """
+        """Create fallback TTS service using default provider (OpenAI)."""
         try:
-            from livekit.agents import inference
+            from pipecat.services.openai.tts import OpenAITTSService
 
-            fallback_model = os.getenv("FALLBACK_TTS_MODEL", DEFAULT_TTS_MODEL)
-            fallback_voice_id = os.getenv("FALLBACK_TTS_VOICE", DEFAULT_TTS_VOICE)
+            fallback_model = os.getenv(
+                "FALLBACK_TTS_MODEL", "gpt-4o-mini-tts"
+            )
+            fallback_voice = os.getenv("FALLBACK_TTS_VOICE", "alloy")
 
             self._logger.warning(
-                f"Primary TTS failed, using fallback: {DEFAULT_TTS_PROVIDER} {fallback_model} ({fallback_voice_id})"
+                f"Primary TTS failed, using fallback: OpenAI "
+                f"{fallback_model} ({fallback_voice})"
             )
-            cfg = self.tts_config
-            return inference.TTS(
-                model=f"{DEFAULT_TTS_PROVIDER}/{fallback_model}",
-                voice=fallback_voice_id,
-                language=self.get_language(
-                    user_language or cfg.language or "en"
-                ),
+            return OpenAITTSService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model=fallback_model,
+                voice=fallback_voice,
             )
         except Exception as e:
             self._logger.critical(f"Fallback TTS also failed: {e}")
             return None
+
+    def _create_stt_from_fallback_chain(
+        self, context: str = ""
+    ) -> Optional[Any]:
+        """Try each provider in the STT fallback chain until one succeeds."""
+        current_provider = self.stt_config.provider.lower()
+        current_model = self.stt_config.model or ""
+
+        for fallback in STT_FALLBACK_CHAIN:
+            provider = fallback["provider"]
+            model = fallback["model"]
+
+            if provider == current_provider and model == current_model:
+                continue
+
+            try:
+                self._logger.info(
+                    f"Trying STT fallback: {provider}/{model}"
+                )
+                stt = self._create_stt_for_provider(provider, model)
+                if stt:
+                    self._logger.info(
+                        f"STT fallback succeeded: {provider}/{model}"
+                    )
+                    return stt
+            except Exception as e:
+                self._logger.warning(
+                    f"STT fallback {provider}/{model} failed: {e}"
+                )
+                continue
+
+        return None
+
+    def _create_stt_for_provider(
+        self, provider: str, model: str
+    ) -> Optional[Any]:
+        """Create STT service for a specific provider/model."""
+        language = self.get_language(
+            self.stt_config.language or "en"
+        )
+
+        if provider == "deepgram":
+            from pipecat.services.deepgram.stt import DeepgramSTTService
+
+            return DeepgramSTTService(
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
+                model=model,
+                language=language,
+            )
+        elif provider == "openai":
+            from pipecat.services.openai.stt import OpenAISTTService
+
+            return OpenAISTTService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model=model,
+                language=language,
+            )
+        elif provider == "google":
+            from pipecat.services.google.stt import GoogleSTTService
+
+            return GoogleSTTService(
+                credentials_path=os.getenv("GOOGLE_CREDENTIALS"),
+            )
+        else:
+            from pipecat.services.deepgram.stt import DeepgramSTTService
+
+            return DeepgramSTTService(
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
+            )
+
+    def _create_llm_from_fallback_chain(
+        self, assistant_prompt: Optional[str] = None
+    ) -> Optional[Any]:
+        """Try each provider in the LLM fallback chain until one succeeds."""
+        current_provider = self.llm_config.provider.lower()
+        current_model = self.llm_config.model or ""
+        temperature = self._get_voice_optimized_temperature()
+
+        for fallback in LLM_FALLBACK_CHAIN:
+            provider = fallback["provider"]
+            model = fallback["model"]
+
+            if provider == current_provider and model == current_model:
+                continue
+
+            try:
+                self._logger.info(
+                    f"Trying LLM fallback: {provider}/{model}"
+                )
+                llm = self._create_llm_for_provider(
+                    provider, model, temperature
+                )
+                if llm:
+                    self._logger.info(
+                        f"LLM fallback succeeded: {provider}/{model}"
+                    )
+                    return llm
+            except Exception as e:
+                self._logger.warning(
+                    f"LLM fallback {provider}/{model} failed: {e}"
+                )
+                continue
+
+        return None
+
+    def _create_llm_for_provider(
+        self, provider: str, model: str, temperature: float
+    ) -> Optional[Any]:
+        """Create LLM service for a specific provider/model."""
+        if provider == "openai":
+            from pipecat.services.openai.llm import OpenAILLMService
+
+            return OpenAILLMService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model=model,
+                params=OpenAILLMService.InputParams(
+                    temperature=temperature,
+                ),
+            )
+        elif provider == "groq":
+            from pipecat.services.groq.llm import GroqLLMService
+
+            return GroqLLMService(
+                api_key=os.getenv("GROQ_API_KEY"),
+                model=model,
+                params=GroqLLMService.InputParams(
+                    temperature=temperature,
+                ),
+            )
+        elif provider in ("google", "gemini"):
+            from pipecat.services.google.llm import GoogleLLMService
+            from super.core.voice.services.service_common import (
+                validate_google_model,
+            )
+
+            model = validate_google_model(model, logger=self._logger)
+            return GoogleLLMService(
+                model=model,
+                params=GoogleLLMService.InputParams(
+                    temperature=temperature,
+                ),
+            )
+        else:
+            from pipecat.services.openai.llm import OpenAILLMService
+
+            return OpenAILLMService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model="gpt-4o-mini",
+                params=OpenAILLMService.InputParams(
+                    temperature=0.4,
+                ),
+            )
+
+    def _create_tts_from_fallback_chain(
+        self, user_language: Optional[str] = None
+    ) -> Optional[Any]:
+        """Try each provider in the TTS fallback chain until one succeeds."""
+        current_provider = self.tts_config.provider.lower()
+        current_model = self.tts_config.model or ""
+
+        for fallback in TTS_FALLBACK_CHAIN:
+            provider = fallback["provider"]
+            model = fallback["model"]
+            voice = fallback.get("voice", "")
+
+            if provider == current_provider and model == current_model:
+                continue
+
+            try:
+                self._logger.info(
+                    f"Trying TTS fallback: {provider}/{model}"
+                )
+                creator = self._get_tts_creator(provider)
+                if creator:
+                    tts = creator(user_language or "en")
+                    if tts:
+                        self._logger.info(
+                            f"TTS fallback succeeded: {provider}/{model}"
+                        )
+                        return tts
+            except Exception as e:
+                self._logger.warning(
+                    f"TTS fallback {provider}/{model} failed: {e}"
+                )
+                continue
+
+        return None
 
     async def _create_tts_service_with_retry(
         self, user_language: Optional[str] = None
@@ -1852,7 +2340,12 @@ class ServiceFactory:
             "deepgram": self._create_deepgram_tts,
             "cartesia": self._create_cartesia_tts,
             "google": self._create_google_tts,
+            "gemini": self._create_gemini_tts_service,
             "lmnt": self._create_lmnt_tts,
+            "aws": self._create_aws_tts,
+            "azure": self._create_azure_tts,
+            "playai": self._create_playai_tts,
+            "playht": self._create_playai_tts,
         }
         return creators.get(provider)
 
@@ -1923,19 +2416,40 @@ class ServiceFactory:
         from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
         cfg = self.tts_config
-        return ElevenLabsTTSService(
-            api_key=os.getenv("ELEVEN_API_KEY"),
-            voice_id=cfg.voice,
-            model=cfg.model or "eleven_multilingual_v2",
-            params=ElevenLabsTTSService.InputParams(
-                language=self.get_language(user_language),
-                stability=self.config.get("stability", 0.5),
-                similarity_boost=self.config.get("similarity", 0.6),
-                style=self.config.get("style", 0.5),
-                use_speaker_boost=True,
-                speed=self.config.get("tts_speed", 0.95),
-            ),
+        kwargs: Dict[str, Any] = {
+            "api_key": os.getenv("ELEVEN_API_KEY"),
+            "voice_id": cfg.voice,
+            "model": cfg.model or "eleven_flash_v2_5",
+            "enable_ssml_parsing": True,
+        }
+
+        params_kwargs: Dict[str, Any] = {
+            "language": self.get_language(user_language),
+        }
+
+        # Only include voice settings if explicitly configured
+        stability = self.config.get("stability")
+        similarity = self.config.get("similarity")
+        style = self.config.get("style")
+        speed = self.config.get("tts_speed")
+
+        if stability is not None:
+            params_kwargs["stability"] = stability
+        if similarity is not None:
+            params_kwargs["similarity_boost"] = similarity
+        if style is not None:
+            params_kwargs["style"] = style
+        if speed is not None:
+            params_kwargs["speed"] = speed
+
+        params_kwargs["use_speaker_boost"] = self.config.get(
+            "use_speaker_boost", True
         )
+
+        kwargs["params"] = ElevenLabsTTSService.InputParams(
+            **params_kwargs
+        )
+        return ElevenLabsTTSService(**kwargs)
 
     def _create_deepgram_tts(self, user_language: str) -> Optional[Any]:
         from pipecat.services.deepgram.tts import DeepgramTTSService
@@ -1949,22 +2463,31 @@ class ServiceFactory:
     def _create_cartesia_tts(self, user_language: str) -> Optional[Any]:
         cfg = self.tts_config
         speed_value = self.config.get("tts_speed", 1.0)
-        speed_map = {0.85: "slow", 1.0: "normal", 1.15: "fast"}
-        speed_value = speed_map[
-            min(speed_map.keys(), key=lambda x: abs(x - speed_value))
-        ]
+        # Continuous float speed (0.6 - 1.5), matching LiveKit parity
+        speed_value = max(0.6, min(1.5, float(speed_value)))
 
         return self._create_cartesia_tts_service(
-            model=cfg.model or "sonic-2",
+            model=cfg.model or "sonic-3",
             voice_id=cfg.voice or "95d51f79-c397-46f9-b49a-23763d3eaa2d",
             language=self.get_language(user_language),
             speed=speed_value,
         )
 
     def _create_google_tts(self, user_language: str) -> Optional[Any]:
+        """Google TTS - auto-detects Gemini TTS vs Google Cloud TTS by model name.
+
+        Routes to GeminiTTSService for gemini-*/chirp-* models,
+        otherwise GoogleTTSService (Chirp3 HD streaming).
+        """
+        cfg = self.tts_config
+        model_lower = (cfg.model or "").lower()
+
+        # Route Gemini TTS models to GeminiTTSService
+        if model_lower.startswith("gemini-") or model_lower.startswith("chirp"):
+            return self._create_gemini_tts_service(user_language)
+
         from pipecat.services.google.tts import GoogleTTSService
 
-        cfg = self.tts_config
         return GoogleTTSService(
             credentials_path=os.getenv("GOOGLE_CREDENTIALS"),
             voice_id=cfg.voice,
@@ -1974,16 +2497,127 @@ class ServiceFactory:
             ),
         )
 
+    def _create_gemini_tts_service(self, user_language: str) -> Optional[Any]:
+        """Gemini TTS - AI-native speech generation with style instructions.
+
+        Uses GeminiTTSService for streaming Gemini TTS models.
+        Models: gemini-2.5-flash-tts, gemini-2.5-pro-tts
+        Voices: Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr, Achernar
+        """
+        if not GEMINI_TTS_AVAILABLE:
+            self._logger.warning(
+                "GeminiTTSService not available, falling back to GoogleTTSService"
+            )
+            from pipecat.services.google.tts import GoogleTTSService
+
+            cfg = self.tts_config
+            return GoogleTTSService(
+                credentials_path=os.getenv("GOOGLE_CREDENTIALS"),
+                voice_id=cfg.voice,
+                params=GoogleTTSService.InputParams(
+                    language=self.get_language(user_language),
+                ),
+            )
+
+        cfg = self.tts_config
+        model = cfg.model or "gemini-2.5-flash-tts"
+
+        # Validate voice - Gemini TTS uses the same voices as Gemini Realtime
+        voice = cfg.voice or "Kore"
+        if voice not in GEMINI_REALTIME_VOICES:
+            self._logger.warning(
+                f"Invalid Gemini TTS voice '{voice}', using 'Kore'. "
+                f"Valid voices: {', '.join(GEMINI_REALTIME_VOICES)}"
+            )
+            voice = "Kore"
+
+        kwargs: Dict[str, Any] = {
+            "api_key": os.getenv("GOOGLE_API_KEY"),
+            "model": model,
+            "voice_id": voice,
+        }
+
+        # Add credentials if available (for Vertex AI)
+        credentials_path = os.getenv("GOOGLE_CREDENTIALS")
+        if credentials_path:
+            kwargs["credentials_path"] = credentials_path
+
+        # Build InputParams with optional style prompt
+        params_kwargs: Dict[str, Any] = {
+            "language": self.get_language(user_language),
+        }
+
+        # Voice instructions map to Gemini TTS "prompt" parameter
+        voice_instructions = self.config.get("voice_instructions")
+        if voice_instructions:
+            params_kwargs["prompt"] = voice_instructions
+
+        kwargs["params"] = GeminiTTSService.InputParams(**params_kwargs)
+
+        self._logger.info(
+            f"Creating Gemini TTS: model={model}, voice={voice}"
+        )
+
+        return GeminiTTSService(**kwargs)
+
     def _create_lmnt_tts(self, user_language: str) -> Optional[Any]:
         from pipecat.services.lmnt.tts import LmntTTSService
 
         cfg = self.tts_config
-        return LmntTTSService(
-            api_key=os.getenv("LMNT_API_KEY"),
-            voice_id=cfg.voice,
-            model=cfg.model or "aurora",
+        kwargs: Dict[str, Any] = {
+            "api_key": os.getenv("LMNT_API_KEY"),
+            "voice_id": cfg.voice,
+            "model": cfg.model or "aurora",
+            "language": self.get_language(user_language),
+            "sample_rate": 24000,
+        }
+
+        # Optional expressiveness parameters
+        temperature = self.config.get("tts_temperature")
+        top_p = self.config.get("tts_top_p")
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+
+        return LmntTTSService(**kwargs)
+
+    def _create_aws_tts(self, user_language: str) -> Optional[Any]:
+        """AWS Polly TTS - multiple speech engines."""
+        from pipecat.services.aws.tts import AWSTTSService
+
+        cfg = self.tts_config
+        aws_region = self.config.get(
+            "aws_region", os.getenv("AWS_REGION", "ap-south-1")
+        )
+        return AWSTTSService(
+            voice=cfg.voice or "Ruth",
             language=self.get_language(user_language),
-            sample_rate=24000,
+            region=aws_region,
+        )
+
+    def _create_azure_tts(self, user_language: str) -> Optional[Any]:
+        """Azure Speech TTS - requires speech_key and speech_region."""
+        from pipecat.services.azure.tts import AzureTTSService
+
+        cfg = self.tts_config
+        return AzureTTSService(
+            speech_key=os.getenv("AZURE_SPEECH_KEY"),
+            speech_region=os.getenv("AZURE_SPEECH_REGION"),
+            voice=cfg.voice,
+            language=self.get_language(user_language),
+        )
+
+    def _create_playai_tts(self, user_language: str) -> Optional[Any]:
+        """PlayAI/PlayHT TTS."""
+        from pipecat.services.playai.tts import PlayAITTSService
+
+        cfg = self.tts_config
+        return PlayAITTSService(
+            api_key=os.getenv("PLAYAI_API_KEY"),
+            user_id=os.getenv("PLAYAI_USER_ID"),
+            model=cfg.model or "Play3.0-mini",
+            language=self.get_language(user_language),
         )
 
     def _lookup_language_setting(

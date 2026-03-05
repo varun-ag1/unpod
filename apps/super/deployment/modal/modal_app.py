@@ -62,8 +62,21 @@ def _generate_requirements_txt() -> str:
     return "\n".join(lines) + "\n"
 
 
+# --- Configurable image options ---
+IMAGE_TYPE = os.environ.get("MODAL_IMAGE", "debian_slim")
+PYTHON_VERSION = os.environ.get("MODAL_PYTHON_VERSION", "3.12")
+
+_IMAGE_BUILDERS = {
+    "debian_slim": modal.Image.debian_slim,
+    "ubuntu_22.04": lambda **kw: modal.Image.from_registry(
+        f"ubuntu:22.04", **kw
+    ),
+    "micromamba": modal.Image.micromamba,
+}
+_base_image_fn = _IMAGE_BUILDERS.get(IMAGE_TYPE, modal.Image.debian_slim)
+
 voice_image = (
-    modal.Image.debian_slim(python_version="3.12")
+    _base_image_fn(python_version=PYTHON_VERSION)
     .apt_install(
         "gcc", "g++", "python3-dev", "libpq-dev", "git", "curl",
         "portaudio19-dev", "ffmpeg", "libsndfile1",
@@ -78,6 +91,7 @@ voice_image = (
             "SETTINGS_FILE", "super_services.settings.prod"
         ),
         "SKIP_DB_CHECK": "1",
+        "HF_HOME": "/app/.hf_cache",
     })
     .add_local_dir("super", remote_path="/app/super", copy=True)
     .add_local_dir("super_services", remote_path="/app/super_services", copy=True)
@@ -87,17 +101,38 @@ voice_image = (
         "cd /app && python super_services/orchestration/executors/"
         "voice_executor_v3.py download-files",
     )
+    .run_commands(
+        'python -c "'
+        "from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2; "
+        'ONNXMiniLM_L6_V2()"',
+    )
 )
 
+
+# --- Configurable deployment options (via env vars or setup.py) ---
+REGION = os.environ.get("MODAL_REGION", "ap-south")
+CPU = float(os.environ.get("MODAL_CPU", "4"))
+MEMORY = int(os.environ.get("MODAL_MEMORY_GB", "8")) * 1024
+GPU_TYPE = os.environ.get("MODAL_GPU", "")
+MIN_CONTAINERS = int(os.environ.get("MODAL_MIN_CONTAINERS", "1"))
+MAX_CONTAINERS = int(os.environ.get("MODAL_MAX_CONTAINERS", "10"))
+SCALEDOWN = int(os.environ.get("MODAL_SCALEDOWN", "300"))
+TIMEOUT = int(os.environ.get("MODAL_TIMEOUT", "3600"))
+
+# GPU config: string like "T4", "A100", "T4:2" or empty for CPU-only
+if GPU_TYPE:
+    _proxy_kwargs["gpu"] = GPU_TYPE
 
 @app.cls(
     image=voice_image,
     secrets=[unpod_secrets],
-    cpu=4.0,
-    memory=8192,
-    timeout=3600,
-    scaledown_window=300,
-    min_containers=1,
+    region=REGION,
+    cpu=CPU,
+    memory=MEMORY,
+    timeout=TIMEOUT,
+    scaledown_window=SCALEDOWN,
+    min_containers=MIN_CONTAINERS,
+    max_containers=MAX_CONTAINERS,
     **_proxy_kwargs,
 )
 class VoiceExecutor:

@@ -346,9 +346,40 @@ def cmd_setup() -> int:
             " Edit .env to fill them in."
         )
     else:
-        print("\nSetup complete! Run with: make local")
+        print("\nSetup complete! Run with: task start")
 
     return 0
+
+
+def _start_health_server(port: int = 8600) -> None:
+    """Start a minimal HTTP health check server in a background thread."""
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+
+        def log_message(self, format, *args):
+            pass  # suppress request logs
+
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            server = http.server.HTTPServer(("0.0.0.0", port), _Handler)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            logger.info(f"Health server started on port {port}")
+            return
+        except OSError:
+            logger.warning(
+                f"Port {port} in use, trying {port + 1}"
+            )
+            port += 1
+    logger.error("Failed to start health server after retries")
 
 
 def cmd_start():
@@ -356,6 +387,10 @@ def cmd_start():
 
     Delegates to LiveKit cli.run_app() which reads sys.argv.
     """
+    # Start health check server for deployment platforms (Cerebrium, etc.)
+    health_port = int(os.environ.get("HEALTH_PORT", "8600"))
+    _start_health_server(health_port)
+
     from super_services.libs.core.utils import get_env_name
 
     deps = _lazy_imports()
@@ -364,7 +399,7 @@ def cmd_start():
         "AGENT_NAME", DEFAULT_AGENT_TEMPLATE.format(env=env)
     )
     handler_type = os.environ.get(
-        "WORKER_HANDLER", DEFAULT_HANDLER_TYPE
+        "WORKER_HANDLER", os.environ.get("AGENT_PROVIDER", DEFAULT_HANDLER_TYPE)
     )
 
     voice_agent = deps["VoiceAgentHandler"](
